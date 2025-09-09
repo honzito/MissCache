@@ -1,0 +1,28 @@
+{
+  "name": "honzito/misscache",
+  "type": "library",
+  "description": "Forge-once static caching library for PHP (files are generated only on cache miss).",
+  "keywords": [
+    "php",
+    "cache"
+  ],
+  "homepage": "https://github.com/honzito/MissCache",
+  "license": "GPL-3.0-or-later",
+  "authors": [
+    {
+      "name": "Honza Malik",
+      "email": "honza.malik@ecn.cz",
+      "homepage": "https://ecnstudio.cz",
+      "role": "Developer"
+    }
+  ],
+  "require": {
+    "php": ">=8.3.0"
+  },
+  "autoload": {
+    "psr-4": {
+      "MissCache\\": "src/"
+    }
+  },
+  "minimum-stability": "stable"
+}
