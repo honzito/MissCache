@@ -2,8 +2,8 @@
 
 namespace MissCache\Plugins;
 
-use MissCache\CacheRequest;
-use MissCache\PluginInterface;
+use MissCache\Util\CacheRequest;
+use MissCache\Util\PluginInterface;
 
 final class PhpThumbPlugin implements PluginInterface
 {
