@@ -25,5 +25,7 @@
       "MissCache\\": "src/"
     }
   },
-  "minimum-stability": "stable"
+  "minimum-stability": "dev",
+  "prefer-stable": true,
+  "version": "dev-main"
 }
