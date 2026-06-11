@@ -1,0 +1,142 @@
+<?php
+
+namespace MissCache\Util;
+
+/**
+ * Disk-cheap eviction for a MissCache cache tree. Meant to run once a day from a
+ * scheduler.
+ *
+ * The cache is forge-on-miss, so deleting a file is self-healing: the next
+ * request regenerates it (one miss). Eviction can therefore be simple and
+ * aggressive — no popularity index, no access-log parsing.
+ *
+ * Recency signal = max(atime, mtime): where the filesystem updates atime
+ * (relatime/strictatime) this behaves as LRU; where atime is frozen (noatime) it
+ * degrades to age-since-write (TTL) — no mount detection needed. The total-size
+ * accounting for the optional size cap rides on the same lstat() already done for
+ * recency, so the cap costs no extra I/O — only memory (a buffer of survivors) and
+ * only when a cap is configured.
+ *
+ * One recursive walk does everything: TTL deletes stream (O(1) memory), stray
+ * atomic-write temp files are reaped, and now-empty mirror directories are pruned.
+ */
+final class CachePurger
+{
+    public function __construct(private readonly string $cacheRoot) {}
+
+    /**
+     * @param array{maxAge?:int,maxBytes?:?int,lowWatermark?:float,tmpMaxAge?:int,dryRun?:bool} $options
+     *   maxAge       delete files whose recency is older than this many seconds (default 30 days)
+     *   maxBytes     hard size cap in bytes; null = no cap (default null)
+     *   lowWatermark when the cap is exceeded, evict down to maxBytes*lowWatermark (default 0.9)
+     *   tmpMaxAge    delete stray ".tmp.*" files older than this many seconds (default 3600)
+     *   dryRun       count what would be removed without deleting anything (default false)
+     * @return array{scanned:int,deleted_age:int,deleted_size:int,deleted_tmp:int,bytes_freed:int,dirs_removed:int,total_after:int}
+     */
+    public function purge(array $options = []): array
+    {
+        $maxAge       = $options['maxAge']       ?? 86400 * 30;
+        $maxBytes     = $options['maxBytes']     ?? null;
+        $lowWatermark = $options['lowWatermark'] ?? 0.9;
+        $tmpMaxAge    = $options['tmpMaxAge']    ?? 3600;
+        $dryRun       = $options['dryRun']       ?? false;
+
+        $stats = [
+            'scanned' => 0, 'deleted_age' => 0, 'deleted_size' => 0, 'deleted_tmp' => 0,
+            'bytes_freed' => 0, 'dirs_removed' => 0, 'total_after' => 0,
+        ];
+        if (!is_dir($this->cacheRoot)) {
+            return $stats;
+        }
+
+        $now       = time();
+        $ageLimit  = $now - $maxAge;
+        $tmpLimit  = $now - $tmpMaxAge;
+        $capActive = $maxBytes !== null;
+
+        $survivors = []; // (path, recency, size) — buffered only when a size cap is active
+        $total     = 0;
+
+        $it = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($this->cacheRoot, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::CHILD_FIRST // children before parent -> we can rmdir emptied dirs
+        );
+
+        foreach ($it as $entry) {
+            $path = $entry->getPathname();
+
+            if ($entry->isDir()) {
+                // Prune emptied mirror dirs, but never the cache root itself (and
+                // rmdir on a symlinked dir fails harmlessly — we never recurse into one).
+                if (!$dryRun && rtrim($path, '/') !== rtrim($this->cacheRoot, '/') && @rmdir($path)) {
+                    $stats['dirs_removed']++;
+                }
+                continue;
+            }
+            if (!$entry->isFile()) {
+                continue;
+            }
+
+            $stats['scanned']++;
+            $st = @stat($path);
+            if ($st === false) {
+                continue;
+            }
+            $recency = max($st['atime'], $st['mtime']);
+            $size    = ($st['blocks'] ?? -1) >= 0 ? $st['blocks'] * 512 : $st['size']; // actual disk usage
+
+            // Stray atomic-write temp file (.tmp.<hex>) left by a crashed/aborted forge.
+            if (preg_match('/\.tmp\.[0-9a-f]+$/', $path)) {
+                if ($recency < $tmpLimit && $this->remove($path, $dryRun)) {
+                    $stats['deleted_tmp']++;
+                    $stats['bytes_freed'] += $size;
+                }
+                continue;
+            }
+
+            // TTL: too old -> delete now, streaming (no buffering).
+            if ($recency < $ageLimit) {
+                if ($this->remove($path, $dryRun)) {
+                    $stats['deleted_age']++;
+                    $stats['bytes_freed'] += $size;
+                }
+                continue;
+            }
+
+            // Survivor: always count toward the total; buffer only if a cap might evict it.
+            $total += $size;
+            if ($capActive) {
+                $survivors[] = ['path' => $path, 'recency' => $recency, 'size' => $size];
+            }
+        }
+
+        // Size cap: evict oldest-first (LRU) until under the low watermark.
+        if ($capActive && $total > $maxBytes) {
+            $target = (int) ($maxBytes * $lowWatermark);
+            usort($survivors, static fn(array $a, array $b): int => $a['recency'] <=> $b['recency']);
+            foreach ($survivors as $f) {
+                if ($total <= $target) {
+                    break;
+                }
+                if ($this->remove($f['path'], $dryRun)) {
+                    $stats['deleted_size']++;
+                    $stats['bytes_freed'] += $f['size'];
+                    $total -= $f['size'];
+                }
+            }
+        }
+
+        $stats['total_after'] = $total;
+        return $stats;
+    }
+
+    /**
+     * Delete $path (unless $dryRun). Returns true when it counts as removed.
+     * unlink() on a symlink removes the link itself, not its target, so a stray
+     * symlink in the cache can never make us delete a file outside the tree.
+     */
+    private function remove(string $path, bool $dryRun): bool
+    {
+        return $dryRun ? true : @unlink($path);
+    }
+}
