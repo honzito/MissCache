@@ -2,3 +2,4 @@
 /.idea/
 /.phpunit.cache/
 composer.lock
+/demo/cache_root/

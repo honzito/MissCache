@@ -1,30 +1,28 @@
 <?php
 
-use MissCache\Util\Util\Util\PluginRouter;
+/*
+ * Example standalone MissCache dispatcher.
+ *
+ * Point your web server's "missing file" fallback for the cache directory at
+ * this script (see README for the nginx try_files / Apache RewriteCond rules).
+ * It runs only on a cache miss; hits are served as static files by the server.
+ */
 
 require __DIR__ . '/../vendor/autoload.php';
 
-$documentRoot = rtrim($_SERVER['DOCUMENT_ROOT'], '/');
-$requestUri   = $_GET['fpath'] ?? '';        // e.g. "/phpThumbCache/img_upload/xy/..."
-$cacheRootUri = '/';                          // not used directly; kept for clarity
+use MissCache\MissCache;
+use MissCache\Plugins\PhpThumbPlugin;
 
-$mC = new MissCache\MissChache( [new PhpThumbPlugin($documentRoot . '/aaa/img.php')] );
-// new SpatieImagePlugin()
+$baseUrl      = '/upload';                                          // public base path of the cache tree
+$basePath     = rtrim($_SERVER['DOCUMENT_ROOT'], '/') . '/upload';  // its location on disk
+$cacheSegment = 'mC';
+$dirMode      = 0775;
 
-$router = new PluginRouter(
-    new PhpThumbPlugin($documentRoot . '/aaa/img.php'),
-    // new SpatieImagePlugin()
-);
+$mC = new MissCache($baseUrl, $basePath, $cacheSegment, $dirMode, [
+    new PhpThumbPlugin('https://' . $_SERVER['HTTP_HOST'] . '/img.php'),
+]);
 
-$req = new CacheRequest($documentRoot, $cacheRootUri, $requestUri);
-
-if ($router->dispatch($req)) {
-    // File generated; stream it
-    $path = $req->filesystemPath();
-    header('Content-Type: ' . (mime_content_type($path) ?: 'application/octet-stream'));
-    readfile($path);
-    exit;
+if (!$mC->handleRequest($_SERVER['REQUEST_URI'])) {
+    http_response_code(404);
+    echo 'Not a MissCache URL';
 }
-
-http_response_code(500);
-echo 'Generation failed';

@@ -5,15 +5,15 @@ namespace MissCache\Util;
 interface PluginInterface
 {
     /**
-     * Whether this plugin handles the given route prefix (first segment).
-     * Example: "phpThumbCache".
+     * Route prefix this plugin handles (the first segment after the cache
+     * segment in a cache URL). Example: "pT".
      */
     public function getRoutePrefix(): string;
 
     /**
-     * Generate the cached file if missing.
-     * Implementations must write the artifact to $req->filesystemPath().
-     * Should return true on success (file exists at path), false otherwise.
+     * Generate the cache artifact for $req if missing. Implementations must
+     * write the artifact to $req->filesystemPath. Returns true on success
+     * (the file exists at that path afterwards), false otherwise.
      */
     public function generate(CacheRequest $req): bool;
 }
