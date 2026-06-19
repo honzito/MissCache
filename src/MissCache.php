@@ -29,8 +29,17 @@ use MissCache\Util\PluginInterface;
  */
 final class MissCache
 {
-    /** Output extensions a cache artifact may have (gate against writing .php/.htaccess/... into the public cache). */
-    private const ALLOWED_EXT = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'ico', 'svg', 'css', 'js', 'pdf'];
+    /**
+     * Output extensions a cache artifact may have (gate against writing .php/.htaccess/... into the public cache).
+     * Kept in sync with what a plugin can actually emit — currently only raster images
+     * ({@see outExtFromParams}). A wider list (svg/css/js/pdf) would let a hand-crafted URL
+     * cache real image bytes under a mismatched content-type (e.g. JPEG served as text/css);
+     * add an extension here only when a plugin genuinely produces that type.
+     */
+    private const ALLOWED_EXT = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'ico'];
+
+    /** max-age (seconds) advertised on the one PHP miss-serve; later hits are static (web-server controlled). */
+    private const CACHE_MAX_AGE = 604800; // 7 days
 
     private string $baseUrl;        // public base, no trailing slash, e.g. "https://x/img_upload"
     private string $basePath;       // filesystem base, no trailing slash, e.g. "/var/www/x/img_upload"
@@ -209,13 +218,78 @@ final class MissCache
         return new CacheRequest($routePrefix, $dir, $srcName, $params, $outExt, $filesystemPath, $this->dirMode, $this->srcBase, $sourceFsPath);
     }
 
+    /**
+     * Stream the forged artifact with caching headers. This runs only for the
+     * single miss response; every later request is served statically by the web
+     * server. We emit Last-Modified + Cache-Control (and honour If-Modified-Since
+     * with a 304) so this first response is as cacheable as the static hits that
+     * follow. Last-Modified mirrors the file mtime — the exact validator the web
+     * server uses for the static file — so a client revalidating after the file
+     * goes static gets a clean 304 across the PHP→static boundary. We deliberately
+     * do NOT emit an ETag: the static server computes its own (inode/size/mtime)
+     * ETag that we cannot portably reproduce, so a PHP-issued ETag would simply
+     * fail to match on the next revalidation and force a needless full download.
+     */
     private function serve(string $path, string $ext): void
     {
+        clearstatcache(true, $path);
+        $mtime = filemtime($path);
+        $size  = filesize($path);
+        if ($mtime === false || $size === false) {
+            // The artifact vanished between handleRequest()'s is_file() check and
+            // here (e.g. a concurrent purge) — don't serve a mangled response.
+            http_response_code(500);
+            return;
+        }
+        $headers = self::cacheHeaders($ext, $mtime, $size);
+
+        if (self::isClientCacheFresh($mtime)) {
+            if (!headers_sent()) {
+                http_response_code(304);
+                header('Last-Modified: ' . $headers['Last-Modified']);
+                header('Cache-Control: ' . $headers['Cache-Control']);
+            }
+            return; // 304: no body
+        }
+
         if (!headers_sent()) {
-            header('Content-Type: ' . self::mimeForExt($ext));
-            header('Content-Length: ' . (string) filesize($path));
+            foreach ($headers as $name => $value) {
+                header($name . ': ' . $value);
+            }
         }
         readfile($path);
+    }
+
+    /**
+     * Cache headers for a forged artifact. Pure (no I/O, no globals) so it is
+     * unit-testable.
+     *
+     * @return array{Content-Type:string, Content-Length:string, Last-Modified:string, Cache-Control:string}
+     */
+    private static function cacheHeaders(string $ext, int $mtime, int $size): array
+    {
+        return [
+            'Content-Type'   => self::mimeForExt($ext),
+            'Content-Length' => (string) $size,
+            'Last-Modified'  => gmdate('D, d M Y H:i:s', $mtime) . ' GMT',
+            'Cache-Control'  => 'public, max-age=' . self::CACHE_MAX_AGE,
+        ];
+    }
+
+    /**
+     * Whether the client's If-Modified-Since covers the artifact's mtime (→ 304).
+     * $server defaults to $_SERVER but is injectable for testing.
+     *
+     * @param array<string,mixed>|null $server
+     */
+    private static function isClientCacheFresh(int $mtime, ?array $server = null): bool
+    {
+        $ifModifiedSince = trim((string) (($server ?? $_SERVER)['HTTP_IF_MODIFIED_SINCE'] ?? ''));
+        if ($ifModifiedSince === '') {
+            return false;
+        }
+        $since = strtotime($ifModifiedSince);
+        return $since !== false && $mtime <= $since;
     }
 
     /** Output extension derived from the phpThumb "f" param (defaults to jpg). */
@@ -232,6 +306,7 @@ final class MissCache
         };
     }
 
+    /** Content type for an output extension. Arms must stay in sync with {@see ALLOWED_EXT}. */
     private static function mimeForExt(string $ext): string
     {
         return match (strtolower($ext)) {
@@ -242,10 +317,6 @@ final class MissCache
             'avif' => 'image/avif',
             'bmp'  => 'image/bmp',
             'ico'  => 'image/x-icon',
-            'svg'  => 'image/svg+xml',
-            'css'  => 'text/css',
-            'js'   => 'application/javascript',
-            'pdf'  => 'application/pdf',
             default => 'application/octet-stream',
         };
     }

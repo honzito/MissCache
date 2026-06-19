@@ -66,7 +66,7 @@ final class PhpThumbPluginTest extends TestCase
     /** The placeholder type follows the requested output extension (jpeg -> jpg asset). */
     public function testPlaceholderMatchesOutputExtension(): void
     {
-        foreach (['png', 'gif', 'webp', 'avif'] as $ext) {
+        foreach (['png', 'gif', 'webp', 'avif', 'bmp', 'ico'] as $ext) {
             $srcDir = $this->tmp . "/img_upload/$ext";
             mkdir($srcDir, 0775, true);
             $target = $this->tmp . "/img_upload/mC/pT/$ext/gone.png!w=10.$ext";

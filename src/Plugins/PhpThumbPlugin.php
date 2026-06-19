@@ -17,22 +17,15 @@ use MissCache\Util\PluginInterface;
  *
  * Failure handling (negative caching): phpThumb normally answers an unusable
  * source (missing/corrupt/unsupported/too-large) with its own error image as
- * HTTP 200, which a naive cache would store forever. To avoid that, the
- * subrequest carries the {@see FORGE_HEADER}; a cooperating entry point reacts
- * by switching phpThumb into "redirect on error" mode, so any failure becomes a
- * non-2xx response. On such a response (or a known-missing source) this plugin
- * writes a tiny 1×1 placeholder of the requested type, so the miss is resolved
- * once and every later request is served statically instead of re-forging.
+ * HTTP 200, which a naive cache would store forever. To avoid that, the entry
+ * point (AA's img.php) is configured to redirect to a blank placeholder on any
+ * thumbnailing failure, so an unusable source yields a non-2xx response. On such
+ * a response (or a known-missing source) this plugin writes a tiny 1×1
+ * placeholder of the requested type, so the miss is resolved once and every
+ * later request is served statically instead of re-forging.
  */
 final class PhpThumbPlugin implements PluginInterface
 {
-    /**
-     * Request header that asks the entry point to signal generation failures as
-     * a non-2xx response instead of a 200 error image. Sent as a header (not a
-     * GET parameter) because phpThumb rejects any unknown GET parameter.
-     */
-    private const FORGE_HEADER = 'X-MissCache-Forge: 1';
-
     /**
      * @param string $phpThumbEntryUrl absolute URL of the phpThumb entry point, e.g. "https://example.org/apc-aa/img.php"
      * @param string $routePrefix      route prefix this plugin answers to (first cache-path segment)
@@ -119,9 +112,10 @@ final class PhpThumbPlugin implements PluginInterface
     }
 
     /**
-     * Fetch $url with the forge header. Returns [httpStatus, body]; httpStatus is
-     * 0 on a transport-level failure (entry point unreachable), in which case
-     * body is false.
+     * Fetch $url. Returns [httpStatus, body]; httpStatus is 0 on a transport-level
+     * failure (entry point unreachable), in which case body is false. Redirects
+     * are never followed — the entry point answers a failed generation with a
+     * redirect, and that non-2xx status is our negative-cache signal.
      *
      * @return array{0:int,1:string|false}
      */
@@ -135,7 +129,6 @@ final class PhpThumbPlugin implements PluginInterface
                 CURLOPT_PROTOCOLS      => CURLPROTO_HTTP | CURLPROTO_HTTPS,
                 CURLOPT_CONNECTTIMEOUT => 10,
                 CURLOPT_TIMEOUT        => 30,
-                CURLOPT_HTTPHEADER     => [self::FORGE_HEADER],
             ]);
             $body = curl_exec($ch);
             $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -147,7 +140,6 @@ final class PhpThumbPlugin implements PluginInterface
             'timeout'         => 30,
             'follow_location' => 0,
             'ignore_errors'   => true, // capture the body/status even on a non-2xx response
-            'header'          => self::FORGE_HEADER . "\r\n",
         ]]);
         $body = @file_get_contents($url, false, $ctx);
         $code = $this->statusFromHeaders($http_response_header ?? []);
