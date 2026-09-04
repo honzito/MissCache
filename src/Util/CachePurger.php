@@ -57,7 +57,8 @@ final class CachePurger
      *   maxAge       delete files whose recency is older than this many seconds (default 30 days)
      *   maxBytes     hard size cap in bytes; null = no cap (default null)
      *   lowWatermark when the cap is exceeded, evict down to maxBytes*lowWatermark (default 0.9)
-     *   tmpMaxAge    delete stray ".tmp.*" files older than this many seconds (default 3600)
+     *   tmpMaxAge    delete stray atomic-write temp files ("mc<hex>.tmp", and the
+     *                legacy "*.tmp.<hex>") older than this many seconds (default 3600)
      *   dryRun       count what would be removed without deleting anything (default false)
      * @return array{scanned:int,deleted_age:int,deleted_size:int,deleted_tmp:int,bytes_freed:int,dirs_removed:int,total_after:int}
      */

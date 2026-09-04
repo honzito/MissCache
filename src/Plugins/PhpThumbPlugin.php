@@ -102,14 +102,28 @@ final class PhpThumbPlugin implements PluginInterface
         return is_file($file) ? $file : null;
     }
 
-    /** Atomically write $bytes to $target (creating parent dirs), so a concurrent request never serves a half-written file. */
+    /**
+     * Atomically store $bytes at $target (creating parent dirs), so a concurrent
+     * request never serves a half-written file. Best-effort: false only means the
+     * artifact will have to be forged again next time, never that the caller has
+     * nothing to serve.
+     *
+     * The temp name is short and INDEPENDENT of $target — "mc<hex>.tmp" in the same
+     * directory, not "<target>.tmp.<hex>". Suffixing the target used to add 21 bytes
+     * to a name that is already at most NAME_MAX (255) bytes, so a perfectly
+     * storable artifact of 235..255 bytes failed to write with ENAMETOOLONG while
+     * $target itself would have fit. Same directory, so the rename stays atomic;
+     * random, so concurrent forges still never collide. ".tmp" is outside
+     * MissCache::ALLOWED_EXT, so the transient file can never be served as an
+     * artifact, and CachePurger reaps any that a crashed forge leaves behind.
+     */
     private function writeFile(string $target, string $bytes, int $dirMode): bool
     {
         $dir = \dirname($target);
         if (!is_dir($dir) && !mkdir($dir, $dirMode, true) && !is_dir($dir)) {
             return false;
         }
-        $tmp = $target . '.tmp.' . bin2hex(random_bytes(8)); // unique per write so concurrent forges never collide
+        $tmp = $dir . '/mc' . bin2hex(random_bytes(8)) . '.tmp';
         if (@file_put_contents($tmp, $bytes) === false) {
             return false;
         }

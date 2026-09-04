@@ -97,6 +97,36 @@ final class PhpThumbPluginTest extends TestCase
         self::assertSame([], glob($cacheDir . '/*.tmp') ?: [], 'a failed store leaves no temp litter');
     }
 
+    /**
+     * A name the filesystem accepts must actually be stored.
+     *
+     * The temp file used to be "<target>.tmp.<hex>", adding 21 bytes to a name that
+     * may already be at NAME_MAX: a 235..255-byte artifact then failed to write with
+     * ENAMETOOLONG even though the target itself would have fit. The temp name is now
+     * short and independent of the target, so the whole budget is available.
+     */
+    public function testNameNearTheFilesystemLimitIsStored(): void
+    {
+        $srcDir = $this->tmp . '/img_upload/123';
+        mkdir($srcDir, 0775, true);
+        $cacheDir = $this->tmp . '/img_upload/mC/pT/123';
+        mkdir($cacheDir, 0775, true);
+
+        $name   = str_repeat('a', 250) . '.jpg';   // 254 bytes: fits, old temp name did not
+        $target = $cacheDir . '/' . $name;
+        self::assertLessThanOrEqual(255, \strlen($name), 'test premise: the name itself is storable');
+
+        $req = new CacheRequest(
+            'pT', '123', 'gone.jpg', 'w=10', 'jpg', $target, 0775, 'img_upload', $srcDir . '/gone.jpg'
+        );
+
+        $bytes = (new PhpThumbPlugin('http://127.0.0.1:1/never'))->generate($req);
+
+        self::assertNotNull($bytes);
+        self::assertFileExists($target, 'a name within NAME_MAX must reach the disk');
+        self::assertStringEqualsFile($target, $bytes);
+    }
+
     /** The placeholder type follows the requested output extension (jpeg -> jpg asset). */
     public function testPlaceholderMatchesOutputExtension(): void
     {
