@@ -90,6 +90,70 @@ final class CacheRequest
     }
 
     /**
+     * Split a cache filename into path segments that each fit within $maxSegment
+     * bytes, or return it whole when it already does.
+     *
+     * NAME_MAX caps ONE path component (255 bytes on ext4/xfs/btrfs, 143 on
+     * eCryptfs); PATH_MAX caps the whole path at 4096. Spreading a long name over
+     * several components is therefore the only way to address it at all — and the
+     * web server, not just the filesystem, enforces this: measured on
+     * actionapps.org, a cache URL whose last segment is 260 bytes is answered 403
+     * by Apache, whose rewrite stat()s the segment, gets ENAMETOOLONG and never
+     * reaches PHP. Nothing PHP-side can rescue such a URL.
+     *
+     * The segments come out as equal in length as the total allows (differing by at
+     * most one byte), so a long name never ends in a one-character directory, and
+     * the ORIGINAL EXTENSION always rides on the last one — the static server types
+     * its response from that segment on every hit that never touches PHP.
+     *
+     * Reversible by concatenation: {@see joinFilename()}.
+     *
+     * @return list<string> one element when no split is needed
+     */
+    public static function splitFilename(string $filename, int $maxSegment): array
+    {
+        $total = strlen($filename);
+        if ($total <= $maxSegment) {
+            return [$filename];
+        }
+
+        $dot       = strrpos($filename, '.');
+        $extension = $dot === false ? '' : substr($filename, $dot);
+        $body      = $dot === false ? $filename : substr($filename, 0, $dot);
+
+        $count = intdiv($total + $maxSegment - 1, $maxSegment);   // ceil: fewest segments that fit
+        // Spread the WHOLE length (extension included) evenly, so the last segment —
+        // the one carrying the extension — comes out the same size as the others
+        // rather than that much longer.
+        $even      = intdiv($total, $count);
+        $remainder = $total % $count;
+
+        if ($even < strlen($extension)) {
+            throw new \RuntimeException('maxSegment too small for the extension');
+        }
+
+        $chunks = [];
+        $offset = 0;
+        for ($i = 0; $i < $count; $i++) {
+            $length = $even + ($i < $remainder ? 1 : 0);
+            if ($i === $count - 1) {
+                $length -= strlen($extension);   // the extension is appended below
+            }
+            $chunks[] = substr($body, $offset, $length);
+            $offset  += $length;
+        }
+        $chunks[$count - 1] .= $extension;
+
+        return $chunks;
+    }
+
+    /** Reverse of {@see splitFilename()}. @param list<string> $chunks */
+    public static function joinFilename(array $chunks): string
+    {
+        return implode('', $chunks);
+    }
+
+    /**
      * Encode a string into a short, readable, filesystem- and URL-path-safe form.
      *
      * Kept literal (legal in a URL path segment, on Linux/macOS/Windows filenames,

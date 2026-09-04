@@ -41,6 +41,23 @@ final class MissCache
     /** max-age (seconds) advertised on the one PHP miss-serve; later hits are static (web-server controlled). */
     private const CACHE_MAX_AGE = 604800; // 7 days
 
+    /**
+     * Segment that announces the filename occupying the following N path
+     * components. It sits at a FIXED position — immediately after the route prefix
+     * — so the parse is positional rather than a search.
+     *
+     * Position alone is not enough to keep it unambiguous, though: srcDir goes into
+     * the URL RAW (only the filename passes through {@see CacheRequest::encode()},
+     * whose alphabet excludes "+"), so a source directory literally named "+5" sits
+     * in exactly that slot. The marker's PRESENCE is therefore canonical too — see
+     * {@see needsSplitMarker()} — which both disambiguates that case and stops one
+     * artifact from being reachable under two spellings.
+     */
+    private const SPLIT_MARKER = '+';
+
+    /** A srcDir whose first segment would be read as a split marker. */
+    private const AMBIGUOUS_SRCDIR = '~^\\+[1-9][0-9]*+(?:/|$)~';
+
     private string $baseUrl;        // public base, no trailing slash, e.g. "https://x/img_upload"
     private string $basePath;       // filesystem base, no trailing slash, e.g. "/var/www/x/img_upload"
     private string $cacheSegment;   // cache subdir, no slashes, e.g. "mC"
@@ -49,12 +66,20 @@ final class MissCache
     private array $plugins = [];
     private string $publicPrefix;   // URL path that every cache URL starts with, e.g. "/img_upload/mC/"
     private string $srcBase;        // docroot-relative base shared by cache and sources, e.g. "img_upload"
+    private int $maxSegmentLength;  // NAME_MAX of the filesystem holding the cache
 
     /**
      * @param array<int, PluginInterface> $plugins
+     * @param int $maxSegmentLength  Longest single path component the cache filesystem accepts.
+     *                               255 on ext4/xfs/btrfs; lower it (eCryptfs caps it at 143) and
+     *                               longer names are split over more components instead of failing.
      */
-    public function __construct(string $baseUrl, string $basePath, string $cacheSegment, int $dirMode, array $plugins)
+    public function __construct(string $baseUrl, string $basePath, string $cacheSegment, int $dirMode, array $plugins, int $maxSegmentLength = 255)
     {
+        if ($maxSegmentLength < 16) {
+            throw new \InvalidArgumentException('maxSegmentLength must leave room for a name');
+        }
+        $this->maxSegmentLength = $maxSegmentLength;
         $this->baseUrl      = rtrim($baseUrl, '/');
         $this->basePath     = rtrim($basePath, '/');
         $this->cacheSegment = trim($cacheSegment, '/');
@@ -102,8 +127,13 @@ final class MissCache
         $outExt   = self::outExtFromParams($params);
         $filename = CacheRequest::buildFilename($srcName, $params, $outExt);
 
-        return $this->baseUrl . '/' . $this->cacheSegment . '/' . $routePrefix
-            . ($srcDir !== '' ? '/' . $srcDir : '') . '/' . $filename;
+        // A name too long for one path component is spread over several; below the
+        // cap this adds nothing, so existing cache URLs stay byte-identical.
+        $chunks = CacheRequest::splitFilename($filename, $this->maxSegmentLength);
+        $marker = self::needsSplitMarker($chunks, $srcDir) ? '/' . self::SPLIT_MARKER . \count($chunks) : '';
+
+        return $this->baseUrl . '/' . $this->cacheSegment . '/' . $routePrefix . $marker
+            . ($srcDir !== '' ? '/' . $srcDir : '') . '/' . implode('/', $chunks);
     }
 
     /**
@@ -259,9 +289,39 @@ final class MissCache
             throw new \RuntimeException('Illegal cache path: empty target');
         }
 
-        $dir  = \dirname($rest);
-        $dir  = ($dir === '.' || $dir === DIRECTORY_SEPARATOR) ? '' : $dir;
-        $file = \basename($rest);
+        // A "+N" segment here (fixed position, right after the route prefix) means the
+        // filename was too long for one path component and occupies the last N of them.
+        $chunkCount = 1;
+        $hasMarker  = false;
+        if (preg_match('~^\+([1-9][0-9]*+)/~', $rest, $m)) {   // canonical decimal only: no "+02", no "+0"
+            $hasMarker  = true;
+            $chunkCount = (int) $m[1];
+            $rest       = substr($rest, \strlen($m[0]));
+        }
+
+        $segments = explode('/', $rest);
+        if (\count($segments) < $chunkCount) {
+            throw new \RuntimeException('Illegal cache path: fewer segments than the split announces');
+        }
+        $chunks = \array_splice($segments, -$chunkCount);
+        foreach ($chunks as $chunk) {
+            if ($chunk === '') {
+                throw new \RuntimeException('Illegal cache path: empty segment');
+            }
+        }
+        $dir  = implode('/', $segments);
+        $file = CacheRequest::joinFilename($chunks);
+
+        // Accept only the split we would have emitted ourselves. Without this, one
+        // artifact is reachable under many paths — "+2" vs "+02", a split that was
+        // never needed, or chunks cut anywhere — and each of them forges and stores
+        // its own copy, which is a cheap way for an anonymous client to fill the
+        // disk. Comparing against splitFilename() makes the accepted URL space
+        // exactly the image of getCachedUrl(): one canonical path per artifact.
+        if ($chunks !== CacheRequest::splitFilename($file, $this->maxSegmentLength)
+            || $hasMarker !== self::needsSplitMarker($chunks, $dir)) {
+            throw new \RuntimeException('Non-canonical cache path');
+        }
 
         [$srcName, $params, $outExt] = CacheRequest::parseFilename($file);
 
@@ -289,6 +349,21 @@ final class MissCache
         $sourceFsPath = $this->basePath . '/' . ($dir !== '' ? $dir . '/' : '') . $srcName;
 
         return new CacheRequest($routePrefix, $dir, $srcName, $params, $outExt, $filesystemPath, $this->dirMode, $this->srcBase, $sourceFsPath);
+    }
+
+    /**
+     * Whether a cache URL for these chunks under this srcDir carries the "+N" marker.
+     *
+     * True when the filename really is split, and also when srcDir's first segment
+     * would itself be read as a marker — a source directory named "+5" occupies the
+     * marker's slot, so without the marker its URLs parse back wrong. Both sides of
+     * the round trip ask this one function, so they cannot drift.
+     *
+     * @param list<string> $chunks
+     */
+    private static function needsSplitMarker(array $chunks, string $srcDir): bool
+    {
+        return \count($chunks) > 1 || preg_match(self::AMBIGUOUS_SRCDIR, $srcDir) === 1;
     }
 
     /**
