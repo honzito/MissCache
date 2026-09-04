@@ -132,12 +132,21 @@ final class MissCache
             return true;
         }
 
-        if (!$plugin->generate($req) || !is_file($req->filesystemPath)) {
+        $bytes = $plugin->generate($req);
+        if ($bytes === null || $bytes === '') {
             http_response_code(500);
             return true;
         }
 
-        $this->serve($req->filesystemPath, $req->outExt);
+        // Storing is best-effort, delivering is not: a cache that could not write
+        // (full disk, read-only mount, a name over the filesystem's NAME_MAX, wrong
+        // permissions) must still answer with the artifact it just forged. Failing
+        // to store costs performance — this miss will recur — never a broken image.
+        if (is_file($req->filesystemPath)) {
+            $this->serve($req->filesystemPath, $req->outExt);
+        } else {
+            self::serveUnstored($bytes, $req->outExt);
+        }
         return true;
     }
 
@@ -322,6 +331,25 @@ final class MissCache
             }
         }
         readfile($path);
+    }
+
+    /**
+     * Send an artifact that was forged but could NOT be stored.
+     *
+     * No Last-Modified and no 304 handling: those validators exist to line up with
+     * the ones the web server will issue for the static file, and here there is no
+     * static file to line up with. Cache-Control is still worth sending — the bytes
+     * are a pure function of the URL, so a client may reuse them exactly as long as
+     * it would a stored artifact, and every client that does spares us a re-forge.
+     */
+    private static function serveUnstored(string $bytes, string $ext): void
+    {
+        if (!headers_sent()) {
+            header('Content-Type: ' . self::mimeForExt($ext));
+            header('Content-Length: ' . strlen($bytes));
+            header('Cache-Control: public, max-age=' . self::CACHE_MAX_AGE);
+        }
+        echo $bytes;
     }
 
     /**

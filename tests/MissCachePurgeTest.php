@@ -144,9 +144,9 @@ final class ShortTtlPlugin implements PluginInterface
         return 'sH';
     }
 
-    public function generate(CacheRequest $req): bool
+    public function generate(CacheRequest $req): ?string
     {
-        return false;
+        return null;
     }
 
     public function getPurgeOptions(): array

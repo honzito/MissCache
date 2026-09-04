@@ -46,7 +46,7 @@ final class PhpThumbPlugin implements PluginInterface
         return [];
     }
 
-    public function generate(CacheRequest $req): bool
+    public function generate(CacheRequest $req): ?string
     {
         // Fast path: a source whose directory exists but whose file does not is
         // definitively missing — negative-cache a placeholder without a round-trip.
@@ -62,7 +62,9 @@ final class PhpThumbPlugin implements PluginInterface
         [$code, $body] = $this->httpGet($url);
 
         if ($code >= 200 && $code < 300 && is_string($body) && $body !== '') {
-            return $this->writeFile($req->filesystemPath, $body, $req->dirMode);
+            // Store is best-effort; the bytes are the contract either way.
+            $this->writeFile($req->filesystemPath, $body, $req->dirMode);
+            return $body;
         }
         if ($code !== 0) {
             // Reached phpThumb, but it could not produce the image -> placeholder.
@@ -70,21 +72,22 @@ final class PhpThumbPlugin implements PluginInterface
         }
         // Transport failure (could not reach the entry point): do not negative-cache
         // a transient error; let the next request retry.
-        return false;
+        return null;
     }
 
-    /** Negative-cache: write the 1×1 placeholder matching the requested output type. */
-    private function writePlaceholder(CacheRequest $req): bool
+    /** Negative-cache: store and return the 1×1 placeholder matching the requested output type. */
+    private function writePlaceholder(CacheRequest $req): ?string
     {
         $asset = $this->placeholderAsset($req->outExt);
         if ($asset === null) {
-            return false; // no placeholder for this type — cannot negative-cache safely
+            return null; // no placeholder for this type — cannot negative-cache safely
         }
         $bytes = @file_get_contents($asset);
         if ($bytes === false) {
-            return false;
+            return null;
         }
-        return $this->writeFile($req->filesystemPath, $bytes, $req->dirMode);
+        $this->writeFile($req->filesystemPath, $bytes, $req->dirMode);
+        return $bytes;
     }
 
     /** Absolute path of the shipped placeholder for $ext, or null if none exists. */
@@ -107,7 +110,7 @@ final class PhpThumbPlugin implements PluginInterface
             return false;
         }
         $tmp = $target . '.tmp.' . bin2hex(random_bytes(8)); // unique per write so concurrent forges never collide
-        if (file_put_contents($tmp, $bytes) === false) {
+        if (@file_put_contents($tmp, $bytes) === false) {
             return false;
         }
         if (!@rename($tmp, $target)) {

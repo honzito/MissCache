@@ -11,11 +11,21 @@ interface PluginInterface
     public function getRoutePrefix(): string;
 
     /**
-     * Generate the cache artifact for $req if missing. Implementations must
-     * write the artifact to $req->filesystemPath. Returns true on success
-     * (the file exists at that path afterwards), false otherwise.
+     * Generate the cache artifact for $req and return its bytes, or null if it
+     * could not be produced at all.
+     *
+     * Implementations SHOULD also store the artifact at $req->filesystemPath so
+     * later requests are served statically, but storing is explicitly allowed to
+     * fail: returning the bytes is the contract, writing them is the optimisation.
+     * A cache that cannot store must still deliver — the caller serves whatever
+     * comes back here even when nothing reached the disk (full disk, read-only
+     * mount, a name over the filesystem's NAME_MAX, ...), so such a condition
+     * costs performance and never a broken image.
+     *
+     * Returning null means the artifact itself is unavailable, which the caller
+     * answers with an error status.
      */
-    public function generate(CacheRequest $req): bool;
+    public function generate(CacheRequest $req): ?string;
 
     /**
      * Purge policy for this plugin's cache subtree, overriding the defaults passed
