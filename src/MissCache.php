@@ -143,14 +143,78 @@ final class MissCache
 
     /**
      * Evict cache artifacts (run periodically, e.g. once a day from a scheduler).
-     * Delegates to {@see CachePurger} over this instance's cache root.
+     *
+     * The walk is per plugin: every route-prefix directory under the cache root is
+     * purged on its own, with $options merged with that plugin's
+     * {@see PluginInterface::getPurgeOptions()} (the plugin wins for the keys it
+     * declares). A directory with no registered plugin — a retired one — is purged
+     * with the caller's defaults rather than skipped, so a dead tree cannot become
+     * immortal.
+     *
+     * The size cap is therefore PER PLUGIN, not one budget across the whole tree:
+     * total disk use is the sum of the caps. That is the deliberate price of
+     * keeping each purge a single streaming walk; one global cap would need a
+     * second pass buffering every survivor of every plugin.
+     *
+     * Nothing outside those directories is ever touched — see {@see routeDirs()}.
      *
      * @param array{maxAge?:int,maxBytes?:?int,lowWatermark?:float,tmpMaxAge?:int,dryRun?:bool} $options
      * @return array{scanned:int,deleted_age:int,deleted_size:int,deleted_tmp:int,bytes_freed:int,dirs_removed:int,total_after:int}
      */
     public function purge(array $options = []): array
     {
-        return (new CachePurger($this->basePath . '/' . $this->cacheSegment))->purge($options);
+        $stats = [
+            'scanned' => 0, 'deleted_age' => 0, 'deleted_size' => 0, 'deleted_tmp' => 0,
+            'bytes_freed' => 0, 'dirs_removed' => 0, 'total_after' => 0,
+        ];
+
+        $cacheRoot = $this->basePath . '/' . $this->cacheSegment;
+        foreach (self::routeDirs($cacheRoot) as $prefix) {
+            $plugin = $this->plugins[$prefix] ?? null;
+            $opts   = $plugin === null ? $options : array_merge($options, $plugin->getPurgeOptions());
+
+            foreach ((new CachePurger($cacheRoot . '/' . $prefix))->purge($opts) as $key => $value) {
+                $stats[$key] += $value;
+            }
+        }
+
+        return $stats;
+    }
+
+    /**
+     * Route-prefix directories sitting directly under the cache root.
+     *
+     * Everything a plugin writes lives at least one level below the cache root —
+     * {@see parseRequest()} rejects a path with no segment after the route prefix —
+     * so the root itself holds nothing but these directories. Purging only inside
+     * them therefore loses no artifact, and it makes the root the safe home for the
+     * .htaccess that routes misses here in the first place, for a CACHEDIR.TAG or a
+     * README: the purge never looks at it.
+     *
+     * Dot-directories (.svn, .git, ...) are skipped — they are not cache, and
+     * deleting their contents would corrupt a working copy. So are symlinks, which
+     * would let the walk leave the cache tree.
+     *
+     * @return list<string>
+     */
+    private static function routeDirs(string $cacheRoot): array
+    {
+        $entries = @scandir($cacheRoot);
+        if ($entries === false) {
+            return [];
+        }
+
+        $dirs = [];
+        foreach ($entries as $name) {
+            if (str_starts_with($name, '.')) {   // also covers scandir's "." and ".."
+                continue;
+            }
+            $path = $cacheRoot . '/' . $name;
+            if (is_dir($path) && !is_link($path)) {
+                $dirs[] = $name;
+            }
+        }
+        return $dirs;
     }
 
     /**

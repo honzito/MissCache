@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace MissCache\Tests;
 
 use MissCache\Util\CachePurger;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 final class CachePurgerTest extends TestCase
@@ -135,5 +136,104 @@ final class CachePurgerTest extends TestCase
         $s = (new CachePurger($this->root . '/does-not-exist'))->purge();
         self::assertSame(0, $s['scanned']);
         self::assertSame(0, $s['deleted_age']);
+    }
+
+    /**
+     * Config and marker files an administrator may put in the cache tree survive
+     * both eviction paths — the TTL and the size cap. The .htaccess case is the one
+     * that bit us: it carries the rewrite rule that routes misses to the dispatcher,
+     * so purging it kills every thumbnail on the site, silently and permanently
+     * (biom.cz, 2026-09-03).
+     */
+    #[DataProvider('keepListFiles')]
+    public function testKeepListFilesSurviveTtlAndSizeCap(string $name): void
+    {
+        $keep = $this->makeFile("pT/$name", 86400 * 40, 120);          // 40 days old
+        $art  = $this->makeFile('pT/1/a.jpg!w=1.jpg', 86400 * 40, 512); // an artifact of the same age
+
+        $s = (new CachePurger($this->root))->purge([
+            'maxAge'   => 86400 * 30,
+            'maxBytes' => 1,   // cap of one byte: everything the walk sees is evicted
+        ]);
+
+        self::assertFileExists($keep, "$name must survive a purge");
+        self::assertFileDoesNotExist($art, 'the artifact next to it must still be evicted');
+        self::assertSame(1, $s['scanned'], 'a kept file is not cache and is not counted');
+    }
+
+    /** @return array<string,array{string}> */
+    public static function keepListFiles(): array
+    {
+        return [
+            '.htaccess'    => ['.htaccess'],
+            'web.config'   => ['web.config'],
+            'CACHEDIR.TAG' => ['CACHEDIR.TAG'],
+            'index.html'   => ['index.html'],
+            '.nobackup'    => ['.nobackup'],
+            '.gitignore'   => ['.gitignore'],
+            'README'       => ['README'],
+            'README.txt'   => ['README.txt'],
+        ];
+    }
+
+    public function testVersionControlDirectoriesAreNeitherEmptiedNorPruned(): void
+    {
+        // Deleting these would corrupt a working copy (SVN <= 1.6 keeps a .svn in
+        // every directory, so one can end up inside the cache tree).
+        $svn = $this->makeFile('pT/.svn/entries', 86400 * 40);
+        $git = $this->makeFile('pT/.git/HEAD', 86400 * 40);
+
+        $s = (new CachePurger($this->root))->purge(['maxAge' => 86400 * 30]);
+
+        self::assertFileExists($svn);
+        self::assertFileExists($git);
+        self::assertDirectoryExists($this->root . '/pT/.svn');
+        self::assertSame(0, $s['scanned']);
+        self::assertSame(0, $s['dirs_removed']);
+    }
+
+    public function testJunkDotfilesAreStillPurged(): void
+    {
+        // The keep-list is a list of names, not "every dotfile": OS droppings are
+        // junk, not configuration, and a cache purge is the right place to lose them.
+        $ds  = $this->makeFile('pT/1/.DS_Store', 86400 * 40);
+        $win = $this->makeFile('pT/1/Thumbs.db', 86400 * 40);
+
+        $s = (new CachePurger($this->root))->purge(['maxAge' => 86400 * 30]);
+
+        self::assertFileDoesNotExist($ds);
+        self::assertFileDoesNotExist($win);
+        self::assertSame(2, $s['deleted_age']);
+    }
+
+    public function testSymlinkIsAccountedByTheLinkNotItsTarget(): void
+    {
+        // remove() unlinks the link, never the target, so the size accounting has to
+        // use lstat(): charging the target's size against the cap would evict real
+        // artifacts to "free" bytes the purge never actually frees.
+        $target = $this->root . '/../misscache_symlink_target_' . getmypid();
+        file_put_contents($target, str_repeat('x', 200 * 1024));
+        @mkdir($this->root . '/pT/1', 0775, true);
+        symlink($target, $this->root . '/pT/1/link.jpg!w=1.jpg');
+
+        $s = (new CachePurger($this->root))->purge(['maxAge' => 86400 * 30, 'maxBytes' => null]);
+        @unlink($target);
+
+        self::assertSame(1, $s['scanned']);
+        self::assertLessThan(4096, $s['total_after'], 'the 200 KB target must not be counted as cache');
+    }
+
+    public function testArtifactsInRetiredFormatsAreStillPurged(): void
+    {
+        // Why a KEEP-list and not a DELETE-list ("delete only what looks like an
+        // artifact"): a retired output format or naming scheme must still expire.
+        $oldFormat = $this->makeFile('pT/1/legacy.jpg!w=1.bmp', 86400 * 40);
+        $oldScheme = $this->makeFile('pT/1/no-params-at-all.jpg', 86400 * 40);
+
+        $s = (new CachePurger($this->root))->purge(['maxAge' => 86400 * 30]);
+
+        self::assertFileDoesNotExist($oldFormat);
+        self::assertFileDoesNotExist($oldScheme);
+        self::assertSame(2, $s['deleted_age']);
     }
 }

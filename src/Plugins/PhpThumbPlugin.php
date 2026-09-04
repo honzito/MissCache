@@ -40,6 +40,12 @@ final class PhpThumbPlugin implements PluginInterface
         return $this->routePrefix;
     }
 
+    /** Thumbnails are cheap to re-forge from the original, so the caller's defaults are fine. */
+    public function getPurgeOptions(): array
+    {
+        return [];
+    }
+
     public function generate(CacheRequest $req): bool
     {
         // Fast path: a source whose directory exists but whose file does not is

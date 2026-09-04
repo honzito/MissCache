@@ -19,9 +19,37 @@ namespace MissCache\Util;
  *
  * One recursive walk does everything: TTL deletes stream (O(1) memory), stray
  * atomic-write temp files are reaped, and now-empty mirror directories are pruned.
+ *
+ * Everything the walk finds is treated as a cache artifact, with two named
+ * exceptions ({@see KEEP_FILES}, {@see accept()}) — an administrator's config and
+ * marker files, and version-control directories. Those exceptions are a positive
+ * KEEP-list, not a positive DELETE-list, on purpose: "delete only what looks like
+ * an artifact" would keep obsolete formats and retired naming schemes alive
+ * forever, which is exactly what a cache purge is for.
  */
 final class CachePurger
 {
+    /**
+     * Files that are never cache artifacts: config and marker files somebody may
+     * legitimately place inside the cache tree and would not expect a purge to eat.
+     * (A MissCache cache root holds nothing but plugin directories, so the natural
+     * home for these is that root — where the purge never even looks; this list
+     * protects the ones that have to sit deeper, e.g. a per-plugin .htaccess.)
+     *
+     * `.DS_Store`, `Thumbs.db` and `desktop.ini` are deliberately absent: that is
+     * junk, not configuration, and deleting it is the right outcome.
+     */
+    private const KEEP_FILES = [
+        '.htaccess'    => true,  // Apache/LiteSpeed: routes misses to the dispatcher, Expires headers, Options -Indexes
+        'web.config'   => true,  // the IIS equivalent
+        'CACHEDIR.TAG' => true,  // Cache Directory Tagging Spec — tar --exclude-caches, borg, restic, rsnapshot
+        'index.html'   => true,  // empty file guarding against a directory listing
+        '.nobackup'    => true,  // ad-hoc backup-exclusion marker
+        '.gitignore'   => true,  // when the tree is under version control
+        'README'       => true,  // "generated automatically, do not edit / do not back up"
+        'README.txt'   => true,
+    ];
+
     public function __construct(private readonly string $cacheRoot) {}
 
     /**
@@ -58,7 +86,10 @@ final class CachePurger
         $total     = 0;
 
         $it = new \RecursiveIteratorIterator(
-            new \RecursiveDirectoryIterator($this->cacheRoot, \FilesystemIterator::SKIP_DOTS),
+            new \RecursiveCallbackFilterIterator(
+                new \RecursiveDirectoryIterator($this->cacheRoot, \FilesystemIterator::SKIP_DOTS),
+                static fn(\SplFileInfo $entry): bool => self::accept($entry)
+            ),
             \RecursiveIteratorIterator::CHILD_FIRST // children before parent -> we can rmdir emptied dirs
         );
 
@@ -78,15 +109,22 @@ final class CachePurger
             }
 
             $stats['scanned']++;
-            $st = @stat($path);
+            // lstat, not stat: remove() deletes the link itself, never its target, so a
+            // symlink must be accounted by the link (a few bytes) — charging its target's
+            // size against the cap would evict real artifacts to "free" bytes we never free.
+            // It also lets a broken symlink expire at all; stat() returns false on one, and
+            // the `continue` below then made it immortal.
+            $st = @lstat($path);
             if ($st === false) {
                 continue;
             }
             $recency = max($st['atime'], $st['mtime']);
             $size    = ($st['blocks'] ?? -1) >= 0 ? $st['blocks'] * 512 : $st['size']; // actual disk usage
 
-            // Stray atomic-write temp file (.tmp.<hex>) left by a crashed/aborted forge.
-            if (preg_match('/\.tmp\.[0-9a-f]+$/', $path)) {
+            // Stray atomic-write temp file left by a crashed/aborted forge. Matches
+            // both the current "mc<hex>.tmp" and the legacy "<target>.tmp.<hex>" one,
+            // so temp files written before the rename still get reaped.
+            if (preg_match('~(?:\.tmp\.[0-9a-f]+|/mc[0-9a-f]+\.tmp)$~', $path)) {
                 if ($recency < $tmpLimit && $this->remove($path, $dryRun)) {
                     $stats['deleted_tmp']++;
                     $stats['bytes_freed'] += $size;
@@ -128,6 +166,27 @@ final class CachePurger
 
         $stats['total_after'] = $total;
         return $stats;
+    }
+
+    /**
+     * What the walk is allowed to see.
+     *
+     * A directory whose name starts with a dot (.svn, .git, ...) is pruned: never
+     * descended into, never rmdir'd. It holds no cache, and deleting its contents
+     * would corrupt a working copy.
+     *
+     * A file on {@see KEEP_FILES} is invisible to the walk, so it is never deleted
+     * — and never counted in the statistics either, which is right: it is not
+     * cache, and its handful of bytes should not push against the size cap.
+     */
+    private static function accept(\SplFileInfo $entry): bool
+    {
+        $name = $entry->getFilename();
+
+        if ($entry->isDir()) {
+            return !str_starts_with($name, '.');
+        }
+        return !isset(self::KEEP_FILES[$name]);
     }
 
     /**
