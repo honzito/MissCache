@@ -31,15 +31,23 @@ final class MissCache
 {
     /**
      * Output extensions a cache artifact may have (gate against writing .php/.htaccess/... into the public cache).
-     * Kept in sync with what a plugin can actually emit — currently only raster images
-     * ({@see outExtFromParams}). A wider list (svg/css/js/pdf) would let a hand-crafted URL
-     * cache real image bytes under a mismatched content-type (e.g. JPEG served as text/css);
-     * add an extension here only when a plugin genuinely produces that type.
+     * Exactly the spellings {@see getCachedUrl()} emits ({@see outExtFromParams}: lowercase, never
+     * "jpeg") and compared case-sensitively: ".JPG" or ".jpeg" would be a second storable path
+     * for the same artifact, i.e. free disk fill from a hand-crafted URL. A wider list (svg/css/js/pdf)
+     * would let such a URL cache real image bytes under a mismatched content-type (JPEG served as
+     * text/css); add an extension here only when a plugin genuinely produces that type.
      */
-    private const ALLOWED_EXT = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'ico'];
+    private const ALLOWED_EXT = ['jpg', 'png', 'gif', 'webp', 'avif', 'bmp', 'ico'];
 
     /** max-age (seconds) advertised on the one PHP miss-serve; later hits are static (web-server controlled). */
     private const CACHE_MAX_AGE = 604800; // 7 days
+
+    /**
+     * max-age of a plugin's fallback (served when nothing could be forged). Long enough
+     * that a page full of broken images does not hit PHP on every scroll, short enough
+     * that a source which becomes readable again (or gets uploaded) shows up promptly.
+     */
+    private const FALLBACK_MAX_AGE = 60;
 
     /**
      * Segment that announces the filename occupying the following N path
@@ -140,8 +148,8 @@ final class MissCache
      * Request-time: handle a request for a (missing) cache artifact. Generates it
      * via the matching plugin and streams it to the client.
      *
-     * @return bool true if the request was a MissCache URL and was handled
-     *              (generated & served, or answered with an error status);
+     * @return bool true if the request was a MissCache URL and was handled (generated &
+     *              served, the plugin's fallback served, or answered with an error status);
      *              false if $requestUri is not a MissCache URL (caller continues).
      */
     public function handleRequest(string $requestUri): bool
@@ -164,7 +172,14 @@ final class MissCache
 
         $bytes = $plugin->generate($req);
         if ($bytes === null || $bytes === '') {
-            http_response_code(500);
+            // Nothing could be forged: send the plugin's stand-in, unstored and briefly
+            // cacheable - see PluginInterface::fallback() for why it must never be stored.
+            $fallback = $plugin->fallback($req);
+            if ($fallback === null || $fallback === '') {
+                http_response_code(500);
+                return true;
+            }
+            self::serveUnstored($fallback, $req->outExt, self::FALLBACK_MAX_AGE);
             return true;
         }
 
@@ -197,13 +212,13 @@ final class MissCache
      *
      * Nothing outside those directories is ever touched — see {@see routeDirs()}.
      *
-     * @param array{maxAge?:int,maxBytes?:?int,lowWatermark?:float,tmpMaxAge?:int,dryRun?:bool} $options
-     * @return array{scanned:int,deleted_age:int,deleted_size:int,deleted_tmp:int,bytes_freed:int,dirs_removed:int,total_after:int}
+     * @param array{maxAge?:int,maxBytes?:?int,lowWatermark?:float,tmpMaxAge?:int,stale?:callable,dryRun?:bool} $options
+     * @return array{scanned:int,deleted_age:int,deleted_size:int,deleted_tmp:int,deleted_stale:int,bytes_freed:int,dirs_removed:int,total_after:int}
      */
     public function purge(array $options = []): array
     {
         $stats = [
-            'scanned' => 0, 'deleted_age' => 0, 'deleted_size' => 0, 'deleted_tmp' => 0,
+            'scanned' => 0, 'deleted_age' => 0, 'deleted_size' => 0, 'deleted_tmp' => 0, 'deleted_stale' => 0,
             'bytes_freed' => 0, 'dirs_removed' => 0, 'total_after' => 0,
         ];
 
@@ -329,9 +344,15 @@ final class MissCache
         if ($srcName === '' || strpbrk($srcName, "/\\\0") !== false || str_contains($srcName, '..')) {
             throw new \RuntimeException('Illegal source name');
         }
+        // getCachedUrl() never encodes a control byte into the params (they come from a
+        // template, not from a user), so one is a hand-crafted URL - and CR/LF would
+        // reach the backend query string and the error log as-is.
+        if (preg_match('/[\x00-\x1F\x7F]/', (string) $params)) {
+            throw new \RuntimeException('Illegal parameter');
+        }
 
         // Only ever write known static-asset extensions into the public cache.
-        if (!in_array(strtolower($outExt), self::ALLOWED_EXT, true)) {
+        if (!in_array($outExt, self::ALLOWED_EXT, true)) {
             throw new \RuntimeException('Illegal output extension');
         }
 
@@ -343,9 +364,10 @@ final class MissCache
             throw new \RuntimeException('Resolved path escapes cache root');
         }
 
-        // Absolute path of the source on disk (sources mirror the cache under basePath).
-        // Only correct for sources that actually live under basePath; a plugin must
-        // treat it as a hint (e.g. gate on the parent dir existing), not as truth.
+        // Absolute path of the source on disk. Sources mirror the cache under basePath by
+        // construction - the artifact is written under basePath and served under baseUrl,
+        // so if the two did not name the same tree the cache itself would not work - which
+        // makes this exactly as reliable as $filesystemPath.
         $sourceFsPath = $this->basePath . '/' . ($dir !== '' ? $dir . '/' : '') . $srcName;
 
         return new CacheRequest($routePrefix, $dir, $srcName, $params, $outExt, $filesystemPath, $this->dirMode, $this->srcBase, $sourceFsPath);
@@ -409,29 +431,44 @@ final class MissCache
     }
 
     /**
-     * Send an artifact that was forged but could NOT be stored.
+     * Send bytes that have no file behind them: an artifact that was forged but could
+     * NOT be stored (reusable as long as a stored one - the bytes are a pure function
+     * of the URL, so the default max-age applies), or a plugin's fallback (briefly).
      *
      * No Last-Modified and no 304 handling: those validators exist to line up with
      * the ones the web server will issue for the static file, and here there is no
-     * static file to line up with. Cache-Control is still worth sending — the bytes
-     * are a pure function of the URL, so a client may reuse them exactly as long as
-     * it would a stored artifact, and every client that does spares us a re-forge.
+     * static file to line up with.
      */
-    private static function serveUnstored(string $bytes, string $ext): void
+    private static function serveUnstored(string $bytes, string $ext, int $maxAge = self::CACHE_MAX_AGE): void
     {
         if (!headers_sent()) {
-            header('Content-Type: ' . self::mimeForExt($ext));
-            header('Content-Length: ' . strlen($bytes));
-            header('Cache-Control: public, max-age=' . self::CACHE_MAX_AGE);
+            foreach (self::unstoredHeaders($ext, strlen($bytes), $maxAge) as $name => $value) {
+                header($name . ': ' . $value);
+            }
         }
         echo $bytes;
+    }
+
+    /**
+     * Headers for {@see serveUnstored()}. Pure (no I/O, no globals) so it is unit-testable.
+     *
+     * @return array{Content-Type:string, Content-Length:string, Cache-Control:string, X-Content-Type-Options:string}
+     */
+    private static function unstoredHeaders(string $ext, int $length, int $maxAge): array
+    {
+        return [
+            'Content-Type'   => self::mimeForExt($ext),
+            'Content-Length' => (string) $length,
+            'Cache-Control'  => 'public, max-age=' . $maxAge,
+            'X-Content-Type-Options' => 'nosniff',
+        ];
     }
 
     /**
      * Cache headers for a forged artifact. Pure (no I/O, no globals) so it is
      * unit-testable.
      *
-     * @return array{Content-Type:string, Content-Length:string, Last-Modified:string, Cache-Control:string}
+     * @return array{Content-Type:string, Content-Length:string, Last-Modified:string, Cache-Control:string, X-Content-Type-Options:string}
      */
     private static function cacheHeaders(string $ext, int $mtime, int $size): array
     {
@@ -440,6 +477,7 @@ final class MissCache
             'Content-Length' => (string) $size,
             'Last-Modified'  => gmdate('D, d M Y H:i:s', $mtime) . ' GMT',
             'Cache-Control'  => 'public, max-age=' . self::CACHE_MAX_AGE,
+            'X-Content-Type-Options' => 'nosniff',
         ];
     }
 

@@ -53,14 +53,17 @@ final class CachePurger
     public function __construct(private readonly string $cacheRoot) {}
 
     /**
-     * @param array{maxAge?:int,maxBytes?:?int,lowWatermark?:float,tmpMaxAge?:int,dryRun?:bool} $options
+     * @param array{maxAge?:int,maxBytes?:?int,lowWatermark?:float,tmpMaxAge?:int,stale?:callable,dryRun?:bool} $options
      *   maxAge       delete files whose recency is older than this many seconds (default 30 days)
      *   maxBytes     hard size cap in bytes; null = no cap (default null)
      *   lowWatermark when the cap is exceeded, evict down to maxBytes*lowWatermark (default 0.9)
      *   tmpMaxAge    delete stray atomic-write temp files ("mc<hex>.tmp", and the
      *                legacy "*.tmp.<hex>") older than this many seconds (default 3600)
+     *   stale        callable(string $path, int $size): bool - a file it answers true for
+     *                is deleted regardless of age; lets a plugin reap artifacts it no
+     *                longer stands behind (default none)
      *   dryRun       count what would be removed without deleting anything (default false)
-     * @return array{scanned:int,deleted_age:int,deleted_size:int,deleted_tmp:int,bytes_freed:int,dirs_removed:int,total_after:int}
+     * @return array{scanned:int,deleted_age:int,deleted_size:int,deleted_tmp:int,deleted_stale:int,bytes_freed:int,dirs_removed:int,total_after:int}
      */
     public function purge(array $options = []): array
     {
@@ -68,10 +71,11 @@ final class CachePurger
         $maxBytes     = $options['maxBytes']     ?? null;
         $lowWatermark = $options['lowWatermark'] ?? 0.9;
         $tmpMaxAge    = $options['tmpMaxAge']    ?? 3600;
+        $stale        = $options['stale']        ?? null;
         $dryRun       = $options['dryRun']       ?? false;
 
         $stats = [
-            'scanned' => 0, 'deleted_age' => 0, 'deleted_size' => 0, 'deleted_tmp' => 0,
+            'scanned' => 0, 'deleted_age' => 0, 'deleted_size' => 0, 'deleted_tmp' => 0, 'deleted_stale' => 0,
             'bytes_freed' => 0, 'dirs_removed' => 0, 'total_after' => 0,
         ];
         if (!is_dir($this->cacheRoot)) {
@@ -128,6 +132,15 @@ final class CachePurger
             if (preg_match('~(?:\.tmp\.[0-9a-f]+|/mc[0-9a-f]+\.tmp)$~', $path)) {
                 if ($recency < $tmpLimit && $this->remove($path, $dryRun)) {
                     $stats['deleted_tmp']++;
+                    $stats['bytes_freed'] += $size;
+                }
+                continue;
+            }
+
+            // Disowned by the plugin: delete whatever its age.
+            if ($stale !== null && $stale($path, $st['size'])) {
+                if ($this->remove($path, $dryRun)) {
+                    $stats['deleted_stale']++;
                     $stats['bytes_freed'] += $size;
                 }
                 continue;

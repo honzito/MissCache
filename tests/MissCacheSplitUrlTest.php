@@ -194,7 +194,7 @@ final class MissCacheSplitUrlTest extends TestCase
     /**
      * "+0" and "+02" are NOT markers — the marker is a canonical decimal from 1 up.
      * They stay ordinary directory names, which is right: they are indistinguishable
-     * from any other non-existent source directory and get the usual placeholder,
+     * from any other non-existent source directory and get the usual fallback,
      * rather than opening a second spelling of a real artifact's path.
      */
     public function testNonCanonicalMarkerIsTreatedAsAnOrdinaryDirectory(): void

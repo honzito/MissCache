@@ -6,10 +6,32 @@ namespace MissCache\Tests;
 
 use MissCache\MissCache;
 use MissCache\Plugins\PhpThumbPlugin;
+use MissCache\Util\CacheRequest;
+use MissCache\Util\PluginInterface;
 use PHPUnit\Framework\TestCase;
 
 final class MissCacheTest extends TestCase
 {
+    private string $tmp;
+
+    protected function setUp(): void
+    {
+        $this->tmp = sys_get_temp_dir() . '/misscache_test_' . getmypid() . '_' . uniqid();
+        mkdir($this->tmp, 0775, true);
+    }
+
+    protected function tearDown(): void
+    {
+        $it = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($this->tmp, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::CHILD_FIRST
+        );
+        foreach ($it as $f) {
+            $f->isDir() ? @rmdir($f->getPathname()) : @unlink($f->getPathname());
+        }
+        @rmdir($this->tmp);
+    }
+
     private function mc(): MissCache
     {
         return new MissCache(
@@ -103,10 +125,90 @@ final class MissCacheTest extends TestCase
         $this->mc()->parseRequest("/img_upload/mC/pT/img_upload/123/logo!w~3D1.$ext");
     }
 
+    /**
+     * A control byte in the params only ever comes from a hand-crafted URL (a template
+     * cannot put one there), and it would reach the backend query string and the error
+     * log as-is - so it is rejected before anything else looks at it.
+     */
+    public function testParseRequestRejectsControlBytesInParams(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Illegal parameter');
+        $this->mc()->parseRequest('/img_upload/mC/pT/123/photo.jpg!w=150!~0A~0DForged~3A~20line.jpg');
+    }
+
     /** @return array<string,array{string}> */
     public static function nonImageExtensions(): array
     {
-        return ['svg' => ['svg'], 'css' => ['css'], 'js' => ['js'], 'pdf' => ['pdf']];
+        return [
+            'svg' => ['svg'], 'css' => ['css'], 'js' => ['js'], 'pdf' => ['pdf'],
+            // spellings getCachedUrl() never emits: each would be a second storable path for the same artifact
+            'JPG' => ['JPG'], 'jpeg' => ['jpeg'],
+        ];
+    }
+
+    /**
+     * When nothing can be forged the dispatcher answers the plugin's fallback,
+     * briefly cacheable, and leaves NOTHING on disk - so a source that is unreadable
+     * for a moment (a filesystem refusing PHP) shows up again as soon as it can be
+     * read, instead of being replaced by a 1×1 for good.
+     */
+    public function testMissWithUnreadableSourceServesFallbackAndStoresNothing(): void
+    {
+        mkdir($this->tmp . '/123', 0775, true);   // source dir exists, photo.jpg does not
+        $plugin = new PhpThumbPlugin('https://example.org/img.php', 'pT', static function (string $url): array {
+            self::fail("no HTTP request expected for an unreadable source, got $url");
+        });
+        $mc = new MissCache('https://example.org/img_upload', $this->tmp, 'mC', 0775, [$plugin]);
+
+        ob_start();
+        try {
+            $handled = $mc->handleRequest('/img_upload/mC/pT/123/photo.jpg!w=10!f=png.png');
+        } finally {
+            $out = ob_get_clean();
+        }
+
+        self::assertTrue($handled);
+        self::assertStringEqualsFile(\dirname(__DIR__) . '/assets/blank.png', $out);
+        self::assertDirectoryDoesNotExist($this->tmp . '/mC');
+    }
+
+    /** A plugin with nothing to fall back on gets an error status, never an empty 200 "image". */
+    public function testMissWithoutFallbackAnswers500(): void
+    {
+        $plugin = new class implements PluginInterface {
+            public function getRoutePrefix(): string { return 'pT'; }
+            public function generate(CacheRequest $req): ?string { return null; }
+            public function fallback(CacheRequest $req): ?string { return ''; }
+            public function getPurgeOptions(): array { return []; }
+        };
+        $mc = new MissCache('https://example.org/img_upload', $this->tmp, 'mC', 0775, [$plugin]);
+
+        ob_start();
+        try {
+            $handled = $mc->handleRequest('/img_upload/mC/pT/123/photo.jpg!w=10.jpg');
+        } finally {
+            $out = ob_get_clean();
+        }
+
+        self::assertTrue($handled);
+        self::assertSame('', $out);
+        self::assertSame(500, http_response_code());
+        self::assertDirectoryDoesNotExist($this->tmp . '/mC');
+    }
+
+    /** The fallback is cacheable only briefly; an unstored real artifact as long as a stored one. */
+    public function testUnstoredHeaders(): void
+    {
+        $fallback = self::invokeStatic('unstoredHeaders', ['png', 91, 60]);
+        self::assertSame(
+            ['Content-Type' => 'image/png', 'Content-Length' => '91', 'Cache-Control' => 'public, max-age=60', 'X-Content-Type-Options' => 'nosniff'],
+            $fallback
+        );
+
+        $artifact = self::invokeStatic('unstoredHeaders', ['jpg', 5043, 604800]);
+        self::assertSame('public, max-age=604800', $artifact['Cache-Control']);
+        self::assertArrayNotHasKey('Last-Modified', $artifact, 'no file behind it, nothing for a validator to line up with');
     }
 
     public function testCacheHeadersShape(): void

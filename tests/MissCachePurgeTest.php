@@ -149,6 +149,11 @@ final class ShortTtlPlugin implements PluginInterface
         return null;
     }
 
+    public function fallback(CacheRequest $req): ?string
+    {
+        return null;
+    }
+
     public function getPurgeOptions(): array
     {
         return ['maxAge' => 86400 * 7];

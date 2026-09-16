@@ -15,91 +15,103 @@ use MissCache\Util\PluginInterface;
  * (once per artifact); every later request is served statically by the web
  * server.
  *
- * Failure handling (negative caching): phpThumb normally answers an unusable
- * source (missing/corrupt/unsupported/too-large) with its own error image as
- * HTTP 200, which a naive cache would store forever. To avoid that, the entry
- * point (AA's img.php) is configured to redirect to a blank placeholder on any
- * thumbnailing failure, so an unusable source yields a non-2xx response. On such
- * a response (or a known-missing source) this plugin writes a tiny 1×1
- * placeholder of the requested type, so the miss is resolved once and every
- * later request is served statically instead of re-forging.
+ * Failure handling: phpThumb normally answers an unusable source (missing,
+ * corrupt, unsupported, too large) with its own error image as HTTP 200, which
+ * a naive cache would store forever. To avoid that, the entry point (AA's
+ * img.php) is configured to redirect on any thumbnailing failure, so an unusable
+ * source yields a non-2xx response, generate() returns null and the request is
+ * answered with {@see fallback()} - a 1×1 blank of the requested type, which the
+ * dispatcher never stores (see {@see PluginInterface::fallback()} for why).
  */
 final class PhpThumbPlugin implements PluginInterface
 {
+    /** The shipped 1×1 blanks, one per output type. */
+    private const ASSETS = __DIR__ . '/../../assets';
+
+    /** @var \Closure(string): array{0:int,1:string|false} */
+    private readonly \Closure $fetch;
+
     /**
-     * @param string $phpThumbEntryUrl absolute URL of the phpThumb entry point, e.g. "https://example.org/apc-aa/img.php"
-     * @param string $routePrefix      route prefix this plugin answers to (first cache-path segment)
+     * @param string        $phpThumbEntryUrl absolute URL of the phpThumb entry point, e.g. "https://example.org/apc-aa/img.php"
+     * @param string        $routePrefix      route prefix this plugin answers to (first cache-path segment)
+     * @param \Closure|null $fetch            replaces the HTTP GET ({@see httpGet()} signature) - for tests without a server
      */
     public function __construct(
         private readonly string $phpThumbEntryUrl,
         private readonly string $routePrefix = 'pT',
-    ) {}
+        ?\Closure $fetch = null,
+    ) {
+        $this->fetch = $fetch ?? $this->httpGet(...);
+    }
 
     public function getRoutePrefix(): string
     {
         return $this->routePrefix;
     }
 
-    /** Thumbnails are cheap to re-forge from the original, so the caller's defaults are fine. */
+    /**
+     * Thumbnails are cheap to re-forge from the original, so the caller's defaults are
+     * fine. The one addition reaps the 1×1 blanks an earlier version of this plugin
+     * stored as negative-cache entries: a purge keyed on recency would never reclaim
+     * one that a live page keeps hitting, so the image stayed blank for good.
+     */
     public function getPurgeOptions(): array
     {
-        return [];
+        return ['stale' => self::isBlank(...)];
+    }
+
+    /** Whether the file at $path is byte-identical to one of the shipped blanks (size compared first, so real artifacts are never read). */
+    private static function isBlank(string $path, int $size): bool
+    {
+        static $blanks = null;   // size => bytes, for the handful of assets
+        if ($blanks === null) {
+            $blanks = [];
+            foreach (glob(self::ASSETS . '/blank.*') ?: [] as $asset) {
+                if (($bytes = @file_get_contents($asset)) !== false) {   // never store false: an unreadable cache file would "match" it
+                    $blanks[strlen($bytes)] = $bytes;
+                }
+            }
+        }
+        return isset($blanks[$size]) && @file_get_contents($path) === $blanks[$size];
     }
 
     public function generate(CacheRequest $req): ?string
     {
-        // Fast path: a source whose directory exists but whose file does not is
-        // definitively missing — negative-cache a placeholder without a round-trip.
-        // (Gated on the parent dir to avoid mistaking an unresolved source path
-        // for a missing file; otherwise fall through to the authoritative HTTP probe.)
-        if ($req->sourceFsPath !== null
-            && is_dir(\dirname($req->sourceFsPath))
-            && !is_file($req->sourceFsPath)) {
-            return $this->writePlaceholder($req);
+        // A source PHP cannot see right now - deleted, not uploaded yet, or a filesystem
+        // refusing us for a moment - cannot yield an image, so skip the round-trip. No
+        // need to double-check the parent directory: a wrong "missing" verdict now costs
+        // a 60 s blank, not a permanent file.
+        if ($req->sourceFsPath !== null && !is_file($req->sourceFsPath)) {
+            return null;
         }
 
         $url           = $this->phpThumbEntryUrl . '?' . $req->toRawQueryString(true);
-        [$code, $body] = $this->httpGet($url);
-
-        if ($code >= 200 && $code < 300 && is_string($body) && $body !== '') {
-            // Store is best-effort; the bytes are the contract either way.
-            $this->writeFile($req->filesystemPath, $body, $req->dirMode);
-            return $body;
-        }
-        if ($code !== 0) {
-            // Reached phpThumb, but it could not produce the image -> placeholder.
-            return $this->writePlaceholder($req);
-        }
-        // Transport failure (could not reach the entry point): do not negative-cache
-        // a transient error; let the next request retry.
-        return null;
-    }
-
-    /** Negative-cache: store and return the 1×1 placeholder matching the requested output type. */
-    private function writePlaceholder(CacheRequest $req): ?string
-    {
-        $asset = $this->placeholderAsset($req->outExt);
-        if ($asset === null) {
-            return null; // no placeholder for this type — cannot negative-cache safely
-        }
-        $bytes = @file_get_contents($asset);
-        if ($bytes === false) {
+        [$code, $body] = ($this->fetch)($url);
+        if ($code === 0) {
+            // Not a bad image but a bad setup or an outage: the entry point could not be
+            // reached from the server itself. The visitor sees the fallback either way;
+            // this line is the only trace the operator gets.
+            error_log('MissCache: phpThumb entry point unreachable: ' . substr(addcslashes($url, "\0..\37\177"), 0, 300));   // request-derived: keep it one line
             return null;
         }
-        $this->writeFile($req->filesystemPath, $bytes, $req->dirMode);
-        return $bytes;
+        if ($code < 200 || $code >= 300 || !is_string($body) || $body === '') {
+            return null;   // a failure redirect from the entry point: it could not make an image of this source
+        }
+        // Store is best-effort; the bytes are the contract either way.
+        $this->writeFile($req->filesystemPath, $body, $req->dirMode);
+        return $body;
     }
 
-    /** Absolute path of the shipped placeholder for $ext, or null if none exists. */
-    private function placeholderAsset(string $ext): ?string
+    /** The shipped 1×1 blank of the requested type (jpeg shares the jpg asset), or null for a type we have none for. */
+    public function fallback(CacheRequest $req): ?string
     {
-        $ext = strtolower($ext);
+        $ext = strtolower($req->outExt);
         $ext = $ext === 'jpeg' ? 'jpg' : $ext;
         if (!ctype_alnum($ext)) {   // defence in depth: never let an extension escape the assets dir
             return null;
         }
-        $file = \dirname(__DIR__, 2) . '/assets/blank.' . $ext;
-        return is_file($file) ? $file : null;
+        $bytes = @file_get_contents(self::ASSETS . '/blank.' . $ext);
+        return $bytes === false ? null : $bytes;
     }
 
     /**
@@ -138,7 +150,7 @@ final class PhpThumbPlugin implements PluginInterface
      * Fetch $url. Returns [httpStatus, body]; httpStatus is 0 on a transport-level
      * failure (entry point unreachable), in which case body is false. Redirects
      * are never followed — the entry point answers a failed generation with a
-     * redirect, and that non-2xx status is our negative-cache signal.
+     * redirect, and that non-2xx status is our failure signal.
      *
      * @return array{0:int,1:string|false}
      */

@@ -107,6 +107,13 @@ $mC->handleRequest($_SERVER['REQUEST_URI']);
 On a miss, `PhpThumbPlugin` fetches the image from the phpThumb entry point over a
 local HTTP subrequest (once per artifact) and writes it to the mirrored cache path.
 
+When nothing can be forged — the source is missing or unreadable, or the entry
+point fails — the dispatcher answers the plugin's *fallback* (for `PhpThumbPlugin`
+a 1×1 blank of the requested type) with `max-age=60` and stores **nothing**: a
+failure that passes (a filesystem refusing PHP for a moment) must not become a
+permanent file, and a source deleted for good costs one cheap request per
+client-cache expiry instead of a stray artifact.
+
 ---
 
 ## 🌐 Web server: route only misses to PHP
@@ -146,7 +153,8 @@ A plugin implements `MissCache\Util\PluginInterface`:
 
 ```php
 public function getRoutePrefix(): string;          // e.g. "pT"
-public function generate(CacheRequest $req): bool;  // write $req->filesystemPath; return success
+public function generate(CacheRequest $req): ?string; // return the bytes (and store them at $req->filesystemPath, best-effort); null = nothing could be forged
+public function fallback(CacheRequest $req): ?string; // what to answer instead - served unstored, briefly cacheable; null = 500, so cover every output type you emit
 ```
 
 - **PhpThumbPlugin** — image resizing/cropping via a phpThumb entry point ✅
@@ -159,8 +167,8 @@ public function generate(CacheRequest $req): bool;  // write $req->filesystemPat
 MissCache itself guards the write path: the request URI is rejected if it
 contains `..`, a null byte, or `%` (percent-encoding never appears in a real
 tilde-hex path), the decoded source name must be a pure basename, the resolved
-path must stay under the cache root, and only known static-asset extensions
-(`jpg, png, gif, webp, avif, bmp, ico, svg, css, js, pdf`) are ever written.
+path must stay under the cache root, and only the output extensions a plugin
+emits (`jpg, png, gif, webp, avif, bmp, ico`, lowercase) are ever written.
 
 Two things are the **backend's** responsibility, not MissCache's:
 
