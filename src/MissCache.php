@@ -192,10 +192,12 @@ final class MissCache
         // (full disk, read-only mount, a name over the filesystem's NAME_MAX, wrong
         // permissions) must still answer with the artifact it just forged. Failing
         // to store costs performance — this miss will recur — never a broken image.
-        if (self::store($req, $bytes, $version)) {
+        $stored = self::store($req, $bytes, $version);
+        if ($stored === true) {
             self::serve($req->filesystemPath, $req->outExt, $bytes);
         } else {
-            self::serveUnstored($bytes, $req->outExt);
+            // the same artifact on the next miss - unless its source changed meanwhile: then these bytes are the old content
+            self::serveUnstored($bytes, $req->outExt, ($stored === null) ? self::FALLBACK_MAX_AGE : self::CACHE_MAX_AGE);
         }
         return true;
     }
@@ -214,9 +216,9 @@ final class MissCache
      * before the store would leave a gap.
      *
      * @param list<int> $version sourceVersion() of the source before the artifact was generated
-     * @return bool whether the artifact is on disk
+     * @return bool|null true stored; false could not store; null the source changed, nothing kept
      */
-    private static function store(CacheRequest $req, string $bytes, array $version): bool
+    private static function store(CacheRequest $req, string $bytes, array $version): ?bool
     {
         $dir = \dirname($req->filesystemPath);
         if (!self::makeDirectory($dir, $req->dirMode)) {
@@ -229,7 +231,7 @@ final class MissCache
         }
         if (self::sourceVersion($req->sourceFsPath) !== $version) {
             @unlink($req->filesystemPath);
-            return false;
+            return null;
         }
         return true;
     }
