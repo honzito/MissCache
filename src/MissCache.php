@@ -225,6 +225,9 @@ final class MissCache
         ];
 
         $cacheRoot = $this->basePath . '/' . $this->cacheSegment;
+        if (is_link($cacheRoot)) {
+            return $stats;   // planted, or somebody's own layout - either way no directory of ours to delete from
+        }
         foreach (self::routeDirs($cacheRoot) as $prefix) {
             $plugin = $this->plugins[$prefix] ?? null;
             $opts   = $plugin === null ? $options : array_merge($options, $plugin->getPurgeOptions());
@@ -265,7 +268,7 @@ final class MissCache
         $srcName = $slash === false ? $relative : substr($relative, $slash + 1);
 
         $cacheRoot = $this->basePath . '/' . $this->cacheSegment;
-        $rootReal  = realpath($cacheRoot);
+        $rootReal  = is_link($cacheRoot) ? false : realpath($cacheRoot);   // a symlinked cache root is not ours to delete in, see purge()
         if ($rootReal === false) {
             return 0;   // nothing cached yet
         }

@@ -121,6 +121,7 @@ final class PhpThumbPluginTest extends TestCase
             'image of no source'      => ['new=FFFFFF&w=20&h=20'],
             'debug text'              => ['w=150&phpThumbDebug=9'],
             'forced download'         => ['w=150&down=x.jpg'],
+            'hash instead of an image' => ['w=150&md5s='],
         ];
     }
 

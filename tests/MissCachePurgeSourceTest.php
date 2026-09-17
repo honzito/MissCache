@@ -168,6 +168,21 @@ final class MissCachePurgeSourceTest extends TestCase
         self::assertCount(4, glob("$dir/*"));
     }
 
+    /** a symlinked cache root is no directory of ours - neither purge deletes in it */
+    public function testSymlinkedCacheRootIsLeftAlone(): void
+    {
+        $elsewhere = $this->base . '/elsewhere';
+        mkdir("$elsewhere/pT/123", 0775, true);
+        file_put_contents("$elsewhere/pT/123/photo.jpg!w=150.jpg", 'x');
+        touch("$elsewhere/pT/123/photo.jpg!w=150.jpg", time() - 90 * 86400);
+        symlink($elsewhere, $this->base . '/mC');
+
+        self::assertSame(0, $this->mc()->purgeSource($this->base . '/123/photo.jpg'));
+        self::assertSame(0, $this->mc()->purge()['deleted_age']);
+        self::assertFileExists("$elsewhere/pT/123/photo.jpg!w=150.jpg");
+        unlink($this->base . '/mC');
+    }
+
     /** a planted symlink must not take the deleting out of the cache tree */
     public function testSymlinkedDirectoryIsNotFollowed(): void
     {

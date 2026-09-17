@@ -28,8 +28,8 @@ final class PhpThumbPlugin implements PluginInterface
     /** The shipped 1×1 blanks, one per output type. */
     private const ASSETS = __DIR__ . '/../../assets';
 
-    /** phpThumb parameters no artifact is made with - see generate() */
-    private const FOREIGN_PARAMS = ['src' => true, 'new' => true, 'phpThumbDebug' => true, 'nocache' => true, 'down' => true, 'sia' => true];
+    /** phpThumb parameters no artifact is made with - see generate(); md5s answers a text hash */
+    private const FOREIGN_PARAMS = ['src' => true, 'new' => true, 'phpThumbDebug' => true, 'nocache' => true, 'down' => true, 'sia' => true, 'md5s' => true];
 
     /** @var \Closure(string): array{0:int,1:string|false} */
     private readonly \Closure $fetch;
