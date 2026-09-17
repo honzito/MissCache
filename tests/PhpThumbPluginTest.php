@@ -93,6 +93,24 @@ final class PhpThumbPluginTest extends TestCase
         self::assertFileDoesNotExist($target);
     }
 
+    /** the directories on the way are group-writable whatever the umask: another PHP user stores and purges there too */
+    public function testDirectoriesMadeForAnArtifactGetTheirModeWhateverTheUmask(): void
+    {
+        $target = $this->tmp . '/img_upload/mC/pT/123/sub/photo.jpg!w=10.jpg';
+        $req    = $this->request($target, sourceExists: true);
+        $umask  = umask(0o022);
+        try {
+            self::plugin(200, self::JPEG)->generate($req);
+        } finally {
+            umask($umask);
+        }
+
+        self::assertStringEqualsFile($target, self::JPEG);
+        foreach (['/img_upload/mC', '/img_upload/mC/pT', '/img_upload/mC/pT/123', '/img_upload/mC/pT/123/sub'] as $dir) {
+            self::assertSame(0o775, fileperms($this->tmp . $dir) & 0o777, $dir);
+        }
+    }
+
     public function testForgedArtifactIsStoredAndReturned(): void
     {
         $target = $this->tmp . '/img_upload/mC/pT/123/photo.jpg!w=10.jpg';

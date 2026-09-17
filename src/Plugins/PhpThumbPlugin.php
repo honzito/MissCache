@@ -148,7 +148,7 @@ final class PhpThumbPlugin implements PluginInterface
     private function writeFile(string $target, string $bytes, int $dirMode): bool
     {
         $dir = \dirname($target);
-        if (!is_dir($dir) && !mkdir($dir, $dirMode, true) && !is_dir($dir)) {
+        if (!self::makeDirectory($dir, $dirMode)) {
             return false;
         }
         $tmp = $dir . '/mc' . bin2hex(random_bytes(8)) . '.tmp';
@@ -160,6 +160,28 @@ final class PhpThumbPlugin implements PluginInterface
             return false;
         }
         return is_file($target);
+    }
+
+    /**
+     * mkdir -p which applies $mode whatever the umask of the process and keeps the setgid bit
+     * a new directory inherits: PHP users sharing the cache (two application trees, cron)
+     * store into each other's directories through the group, and a umask of 022 would take
+     * that away. Silent on failure - a warning here would land in front of the image bytes.
+     */
+    private static function makeDirectory(string $dir, int $mode): bool
+    {
+        if (is_dir($dir)) {
+            return true;
+        }
+        $parent = \dirname($dir);
+        if (($parent === $dir) || !self::makeDirectory($parent, $mode)) {
+            return false;
+        }
+        if (!@mkdir($dir, $mode) && !is_dir($dir)) {   // is_dir() again: a parallel forge may have made it meanwhile
+            return false;
+        }
+        @chmod($dir, $mode | (@fileperms($dir) & 0o2000));   // best-effort: one made by another user needs no chmod from us
+        return true;
     }
 
     /**
