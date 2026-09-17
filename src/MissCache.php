@@ -225,7 +225,7 @@ final class MissCache
             return false;
         }
         $tmp = $dir . '/mc' . bin2hex(random_bytes(8)) . '.tmp';
-        if ((@file_put_contents($tmp, $bytes) !== \strlen($bytes)) || !@rename($tmp, $req->filesystemPath)) {
+        if ((@file_put_contents($tmp, $bytes) !== \strlen($bytes)) || !self::sizeIs($tmp, \strlen($bytes)) || !@rename($tmp, $req->filesystemPath)) {
             @unlink($tmp);
             return false;
         }
@@ -234,6 +234,17 @@ final class MissCache
             return null;
         }
         return true;
+    }
+
+    /**
+     * Whether $file has $size bytes on disk. NFS and GlusterFS report a full disk only when the
+     * file is closed, which file_put_contents() does not tell - and a truncated artifact renamed
+     * into place would be served statically, broken, for as long as it is visited.
+     */
+    private static function sizeIs(string $file, int $size): bool
+    {
+        clearstatcache(true, $file);
+        return @filesize($file) === $size;
     }
 
     /**
