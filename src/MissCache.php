@@ -236,6 +236,81 @@ final class MissCache
     }
 
     /**
+     * Delete every artifact made from one source file, whatever plugin or parameters -
+     * call it when the source is overwritten or deleted. A cache URL carries no version
+     * of its source, so an artifact of the old content would otherwise be served until
+     * the purge's max age, and forever while something keeps hitting it.
+     *
+     * Only the source's own directory is listed (plus its twin under each "+N" split
+     * marker), and a branch of a split name is entered only while it can still spell the
+     * source's name - so the cost follows the variants of that directory, never the
+     * whole cache.
+     *
+     * @param string $sourcePath absolute path of the source file; a path outside the base
+     *                           path is not a source of this cache and deletes nothing
+     * @return int number of artifacts deleted
+     */
+    public function purgeSource(string $sourcePath): int
+    {
+        $relative = str_starts_with($sourcePath, $this->basePath . '/') ? substr($sourcePath, strlen($this->basePath) + 1) : '';
+        if ($relative === '' || str_contains($relative, "\0") || preg_match('~(^|/)\.{0,2}(/|$)~', $relative)) {
+            return 0;   // not under the base, or an empty, "." or ".." segment which could leave the cache tree
+        }
+        $slash   = strrpos($relative, '/');
+        $srcDir  = $slash === false ? '' : '/' . substr($relative, 0, $slash);
+        $srcName = $slash === false ? $relative : substr($relative, $slash + 1);
+
+        $deleted   = 0;
+        $cacheRoot = $this->basePath . '/' . $this->cacheSegment;
+        foreach (self::routeDirs($cacheRoot) as $prefix) {
+            $routeDir = $cacheRoot . '/' . $prefix;
+            $deleted += $this->purgeNames($routeDir . $srcDir, 1, '', $srcName);
+            foreach (@scandir($routeDir) ?: [] as $entry) {
+                if (preg_match('~^\+([1-9][0-9]*+)$~', $entry, $m)) {   // the filename occupies the last N path components
+                    $deleted += $this->purgeNames($routeDir . '/' . $entry . $srcDir, (int) $m[1], '', $srcName);
+                }
+            }
+        }
+        return $deleted;
+    }
+
+    /**
+     * Delete the artifacts of $srcName among the filenames spelled by $levels path
+     * components below $dir ($spelled = the components above, joined).
+     */
+    private function purgeNames(string $dir, int $levels, string $spelled, string $srcName): int
+    {
+        $encoded = CacheRequest::encode($srcName);
+        $deleted = 0;
+        foreach (@scandir($dir) ?: [] as $entry) {
+            $name = $spelled . $entry;
+            // every artifact of the source starts with its encoded name - skip what cannot
+            if (($entry === '.') || ($entry === '..') || (!str_starts_with($name, $encoded) && !str_starts_with($encoded, $name))) {
+                continue;
+            }
+            $path = $dir . '/' . $entry;
+            if ($levels > 1) {
+                if (is_dir($path) && !is_link($path)) {
+                    $deleted += $this->purgeNames($path, $levels - 1, $name, $srcName);
+                }
+            } elseif (is_file($path) && self::isArtifactOf($name, $srcName) && @unlink($path)) {
+                $deleted++;
+            }
+        }
+        return $deleted;
+    }
+
+    /** Whether $filename is a cache artifact of the source named $srcName (not merely a name sharing its prefix). */
+    private static function isArtifactOf(string $filename, string $srcName): bool
+    {
+        try {
+            return CacheRequest::parseFilename($filename)[0] === $srcName;
+        } catch (\RuntimeException) {
+            return false;   // not a cache filename at all
+        }
+    }
+
+    /**
      * Route-prefix directories sitting directly under the cache root.
      *
      * Everything a plugin writes lives at least one level below the cache root —
