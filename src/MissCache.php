@@ -193,7 +193,7 @@ final class MissCache
         // permissions) must still answer with the artifact it just forged. Failing
         // to store costs performance — this miss will recur — never a broken image.
         if (self::store($req, $bytes, $version)) {
-            $this->serve($req->filesystemPath, $req->outExt);
+            self::serve($req->filesystemPath, $req->outExt, $bytes);
         } else {
             self::serveUnstored($bytes, $req->outExt);
         }
@@ -589,7 +589,7 @@ final class MissCache
     }
 
     /**
-     * Stream the forged artifact with caching headers. This runs only for the
+     * Send the artifact just stored at $path with caching headers. This runs only for the
      * single miss response; every later request is served statically by the web
      * server. We emit Last-Modified + Cache-Control (and honour If-Modified-Since
      * with a 304) so this first response is as cacheable as the static hits that
@@ -599,19 +599,19 @@ final class MissCache
      * do NOT emit an ETag: the static server computes its own (inode/size/mtime)
      * ETag that we cannot portably reproduce, so a PHP-issued ETag would simply
      * fail to match on the next revalidation and force a needless full download.
+     *
+     * The body is $bytes, not the file: a purge or a concurrent miss may delete the file
+     * right after the store, and reading it again would put a warning in front of the image.
      */
-    private function serve(string $path, string $ext): void
+    private static function serve(string $path, string $ext, string $bytes): void
     {
         clearstatcache(true, $path);
-        $mtime = filemtime($path);
-        $size  = filesize($path);
-        if ($mtime === false || $size === false) {
-            // The artifact vanished between handleRequest()'s is_file() check and
-            // here (e.g. a concurrent purge) — don't serve a mangled response.
-            http_response_code(500);
+        $mtime = @filemtime($path);
+        if ($mtime === false) {
+            self::serveUnstored($bytes, $ext);   // deleted already - the bytes are still the artifact
             return;
         }
-        $headers = self::cacheHeaders($ext, $mtime, $size, time());
+        $headers = self::cacheHeaders($ext, $mtime, \strlen($bytes), time());
 
         if (self::isClientCacheFresh($mtime)) {
             if (!headers_sent()) {
@@ -628,7 +628,7 @@ final class MissCache
                 header($name . ': ' . $value);
             }
         }
-        readfile($path);
+        echo $bytes;
     }
 
     /**

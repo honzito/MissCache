@@ -286,6 +286,18 @@ final class MissCacheTest extends TestCase
         self::assertSame([], glob($this->tmp . '/mC/pT/123/*.tmp') ?: [], 'a failed store leaves no temp litter');
     }
 
+    /** A stored artifact which a purge deletes before it is sent still goes out whole - from memory, without a warning in front of it. */
+    public function testArtifactDeletedRightAfterTheStoreIsStillServed(): void
+    {
+        ob_start();
+        try {
+            self::invokeStatic('serve', [$this->tmp . '/mC/pT/123/gone.jpg!w=10.jpg', 'jpg', self::JPEG]);
+        } finally {
+            $out = ob_get_clean();
+        }
+        self::assertSame(self::JPEG, $out);
+    }
+
     /**
      * A name the filesystem accepts must actually be stored: the temp file used to be
      * "<target>.tmp.<hex>", 21 bytes over a name already near NAME_MAX, so a 235..255-byte
