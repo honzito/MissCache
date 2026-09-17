@@ -117,10 +117,58 @@ final class MissCachePurgeSourceTest extends TestCase
             'sibling of the base'   => ['{base}-other/123/photo.jpg'],
             'the base itself'       => ['{base}/'],
             'parent segment'        => ['{base}/123/../123/photo.jpg'],
-            'current segment'       => ['{base}/./123/photo.jpg'],
-            'empty segment'         => ['{base}/123//photo.jpg'],
             'no file name'          => ['{base}/123/'],
         ];
+    }
+
+    /** "a//b" and "a/./b" name the very same file */
+    public function testSloppyButEqualSpellingOfTheSourceIsFound(): void
+    {
+        $gone = $this->artifact('123/photo.jpg', 'w=150');
+        self::assertSame(1, $this->mc()->purgeSource($this->base . '/./123//photo.jpg'));
+        self::assertFileDoesNotExist($gone);
+    }
+
+    /**
+     * A source directory named like a split marker ("+2/<25 a>") must not reach into the
+     * split tree of another source: "<25 a>photo.jpg" with a 40-byte segment is stored as
+     * "+2/<25 a>/photo.jpg!w=150!h=150.jpg".
+     */
+    public function testMarkerLikeDirectoryLeavesOtherSplitNamesAlone(): void
+    {
+        $other = $this->artifact(str_repeat('a', 25) . 'photo.jpg', 'w=150&h=150');
+        self::assertStringContainsString('/mC/pT/+2/' . str_repeat('a', 25) . '/photo.jpg!w=150!h=150.jpg', $other, 'test premise');
+
+        self::assertSame(0, $this->mc()->purgeSource($this->base . '/+2/' . str_repeat('a', 25) . '/photo.jpg'));
+        self::assertFileExists($other);
+    }
+
+    /** a file next to the artifacts which only looks like one of a source without an extension */
+    public function testFilesWhichAreNotArtifactsStay(): void
+    {
+        $dir = $this->base . '/mC/pT/123';
+        mkdir($dir, 0775, true);
+        foreach (['index.html', 'README.txt', 'web.config', 'CACHEDIR.TAG'] as $file) {
+            touch("$dir/$file");
+        }
+        foreach (['index', 'README', 'web', 'CACHEDIR'] as $source) {
+            self::assertSame(0, $this->mc()->purgeSource($this->base . "/123/$source"));
+        }
+        self::assertCount(4, glob("$dir/*"));
+    }
+
+    /** a planted symlink must not take the deleting out of the cache tree */
+    public function testSymlinkedDirectoryIsNotFollowed(): void
+    {
+        $outside = $this->base . '/outside';
+        mkdir($outside);
+        file_put_contents("$outside/photo.jpg!w=150.jpg", 'x');
+        mkdir($this->base . '/mC/pT', 0775, true);
+        symlink($outside, $this->base . '/mC/pT/123');
+
+        self::assertSame(0, $this->mc()->purgeSource($this->base . '/123/photo.jpg'));
+        self::assertFileExists("$outside/photo.jpg!w=150.jpg");
+        unlink($this->base . '/mC/pT/123');
     }
 
     #[\PHPUnit\Framework\Attributes\DataProvider('foreignPaths')]

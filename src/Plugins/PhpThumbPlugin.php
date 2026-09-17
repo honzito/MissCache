@@ -84,6 +84,7 @@ final class PhpThumbPlugin implements PluginInterface
         if ($req->sourceFsPath !== null && !is_file($req->sourceFsPath)) {
             return null;
         }
+        $version = self::version($req->sourceFsPath);
 
         $url           = $this->phpThumbEntryUrl . '?' . $req->toRawQueryString(true);
         [$code, $body] = ($this->fetch)($url);
@@ -97,9 +98,24 @@ final class PhpThumbPlugin implements PluginInterface
         if ($code < 200 || $code >= 300 || !is_string($body) || $body === '') {
             return null;   // a failure redirect from the entry point: it could not make an image of this source
         }
-        // Store is best-effort; the bytes are the contract either way.
-        $this->writeFile($req->filesystemPath, $body, $req->dirMode);
+        // Store is best-effort; the bytes are the contract either way. Not at all when the
+        // source changed while phpThumb rendered it: the upload which replaced it has purged
+        // the cache already (MissCache::purgeSource()), and this image is of the old one.
+        if (self::version($req->sourceFsPath) === $version) {
+            $this->writeFile($req->filesystemPath, $body, $req->dirMode);
+        }
         return $body;
+    }
+
+    /** @return list<int>|null what tells a replaced (or deleted) source from the one before - null when there is no path to look at */
+    private static function version(?string $path): ?array
+    {
+        if ($path === null) {
+            return null;
+        }
+        clearstatcache(true, $path);
+        $stat = @stat($path);
+        return ($stat === false) ? [] : [$stat['ino'], $stat['size'], $stat['mtime']];
     }
 
     /** The shipped 1×1 blank of the requested type (jpeg shares the jpg asset), or null for a type we have none for. */

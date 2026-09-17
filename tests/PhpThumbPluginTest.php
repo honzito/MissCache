@@ -73,6 +73,26 @@ final class PhpThumbPluginTest extends TestCase
         self::assertNull($plugin->fallback($req), 'no blank for a type we never emit');
     }
 
+    /**
+     * An upload replacing the source while phpThumb renders it has purged the cache already -
+     * storing the image of the old file now would bring it back for good. It is still served.
+     */
+    public function testSourceReplacedDuringTheRenderIsServedButNotStored(): void
+    {
+        $target = $this->tmp . '/img_upload/mC/pT/123/photo.jpg!w=10.jpg';
+        $req    = $this->request($target, sourceExists: true);
+        $source = $req->sourceFsPath;
+        $plugin = new PhpThumbPlugin('https://example.org/img.php', 'pT', static function (string $url) use ($source): array {
+            // the way Files::uploadFile() replaces it: a new file renamed over the old one
+            file_put_contents("$source.new", 'the new photo');
+            rename("$source.new", $source);
+            return [200, self::JPEG];
+        });
+
+        self::assertSame(self::JPEG, $plugin->generate($req));
+        self::assertFileDoesNotExist($target);
+    }
+
     public function testForgedArtifactIsStoredAndReturned(): void
     {
         $target = $this->tmp . '/img_upload/mC/pT/123/photo.jpg!w=10.jpg';

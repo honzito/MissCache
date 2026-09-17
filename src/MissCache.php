@@ -253,22 +253,31 @@ final class MissCache
      */
     public function purgeSource(string $sourcePath): int
     {
-        $relative = str_starts_with($sourcePath, $this->basePath . '/') ? substr($sourcePath, strlen($this->basePath) + 1) : '';
+        $sourcePath = (string) preg_replace('~/(?:\.?/)+~', '/', $sourcePath);   // "a//b", "a/./b" are "a/b"
+        $relative   = str_starts_with($sourcePath, $this->basePath . '/') ? substr($sourcePath, strlen($this->basePath) + 1) : '';
         if ($relative === '' || str_contains($relative, "\0") || preg_match('~(^|/)\.{0,2}(/|$)~', $relative)) {
-            return 0;   // not under the base, or an empty, "." or ".." segment which could leave the cache tree
+            return 0;   // not under the base, or a ".." (or empty) segment which could leave the cache tree
         }
         $slash   = strrpos($relative, '/');
         $srcDir  = $slash === false ? '' : '/' . substr($relative, 0, $slash);
         $srcName = $slash === false ? $relative : substr($relative, $slash + 1);
 
-        $deleted   = 0;
         $cacheRoot = $this->basePath . '/' . $this->cacheSegment;
+        $rootReal  = realpath($cacheRoot);
+        if ($rootReal === false) {
+            return 0;   // nothing cached yet
+        }
+        $deleted = 0;
         foreach (self::routeDirs($cacheRoot) as $prefix) {
             $routeDir = $cacheRoot . '/' . $prefix;
-            $deleted += $this->purgeNames($routeDir . $srcDir, 1, '', $srcName);
+            // a directory which looks like a split marker never holds its artifacts unmarked:
+            // there "+2/<dir>" is the split tree of other sources
+            if (!preg_match(self::AMBIGUOUS_SRCDIR, ltrim($srcDir, '/'))) {
+                $deleted += $this->purgeNames($routeDir . $srcDir, 1, '', $srcName, $rootReal);
+            }
             foreach (@scandir($routeDir) ?: [] as $entry) {
                 if (preg_match('~^\+([1-9][0-9]*+)$~', $entry, $m)) {   // the filename occupies the last N path components
-                    $deleted += $this->purgeNames($routeDir . '/' . $entry . $srcDir, (int) $m[1], '', $srcName);
+                    $deleted += $this->purgeNames($routeDir . '/' . $entry . $srcDir, (int) $m[1], '', $srcName, $rootReal);
                 }
             }
         }
@@ -278,9 +287,16 @@ final class MissCache
     /**
      * Delete the artifacts of $srcName among the filenames spelled by $levels path
      * components below $dir ($spelled = the components above, joined).
+     *
+     * @param ?string $rootReal the resolved cache root, for the first level only: a directory
+     *                          of the source path may be a symlink, which must not take the
+     *                          deleting out of the cache tree (deeper levels skip links)
      */
-    private function purgeNames(string $dir, int $levels, string $spelled, string $srcName): int
+    private function purgeNames(string $dir, int $levels, string $spelled, string $srcName, ?string $rootReal = null): int
     {
+        if (($rootReal !== null) && !str_starts_with((string) realpath($dir) . '/', $rootReal . '/')) {
+            return 0;
+        }
         $encoded = CacheRequest::encode($srcName);
         $deleted = 0;
         foreach (@scandir($dir) ?: [] as $entry) {
@@ -301,14 +317,16 @@ final class MissCache
         return $deleted;
     }
 
-    /** Whether $filename is a cache artifact of the source named $srcName (not merely a name sharing its prefix). */
+    /** Whether $filename is a cache artifact of the source named $srcName - not merely a name
+     *  sharing its prefix, nor "index.html" or "README.txt" next to a source named "index". */
     private static function isArtifactOf(string $filename, string $srcName): bool
     {
         try {
-            return CacheRequest::parseFilename($filename)[0] === $srcName;
+            [$name, , $ext] = CacheRequest::parseFilename($filename);
         } catch (\RuntimeException) {
             return false;   // not a cache filename at all
         }
+        return ($name === $srcName) && in_array($ext, self::ALLOWED_EXT, true);
     }
 
     /**

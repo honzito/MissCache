@@ -102,7 +102,18 @@ $url = $mC->getCachedUrl('pT', 'img_upload/123/photo.jpg?w=150&h=150&zc=1');
 
 // Request time — in your dispatcher, on a cache miss (see public/misscache.php):
 $mC->handleRequest($_SERVER['REQUEST_URI']);
+
+// When a source file is overwritten or deleted — drop everything made from it:
+$mC->purgeSource('/srv/site/img_upload/123/photo.jpg');
+
+// Once a day — expire what nobody asked for lately:
+$mC->purge(['maxAge' => 30 * 86400, 'maxBytes' => 2 * 1024 ** 3]);
 ```
+
+A cache URL carries no version of its source, so an application that replaces a
+file under the same name has to call `purgeSource()` — otherwise the thumbnails of
+the old content stay served until `purge()` expires them. (Browsers that fetched
+one keep it for its `max-age` either way; only a version in the URL would change that.)
 
 On a miss, `PhpThumbPlugin` fetches the image from the phpThumb entry point over a
 local HTTP subrequest (once per artifact) and writes it to the mirrored cache path.
