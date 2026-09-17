@@ -275,4 +275,39 @@ final class MissCacheTest extends TestCase
         $this->expectException(\RuntimeException::class);
         $this->mc()->parseRequest('/img_upload/mC/pT/img_upload/%2e%2e/photo.jpg');
     }
+
+    /**
+     * Only the spelling getCachedUrl() emits is accepted: every alias of an artifact would be
+     * forged and stored as a copy of its own, which purgeSource() never finds.
+     *
+     * @return array<string, array{0: string}>
+     */
+    public static function nonCanonicalPaths(): array
+    {
+        return [
+            'needlessly escaped letter'   => ['/img_upload/mC/pT/123/ph~6Fto.jpg!w=150.jpg'],
+            'escaped dot'                 => ['/img_upload/mC/pT/123/photo~2Ejpg!w=150.jpg'],
+            'lowercase escape'            => ['/img_upload/mC/pT/123/photo~2ejpg!w=150.jpg'],
+            'long escape of ampersand'    => ['/img_upload/mC/pT/123/a~26b.jpg!w=150.jpg'],
+            'extension without f='        => ['/img_upload/mC/pT/123/photo.jpg!w=150.png'],
+            'current directory segment'   => ['/img_upload/mC/pT/./+5/photo.jpg!w=1.jpg'],
+            'empty directory segment'     => ['/img_upload/mC/pT//+5/photo.jpg!w=1.jpg'],
+            'empty segment deeper'        => ['/img_upload/mC/pT/123//photo.jpg!w=1.jpg'],
+        ];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('nonCanonicalPaths')]
+    public function testParseRequestRejectsNonCanonicalSpelling(string $path): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->mc()->parseRequest($path);
+    }
+
+    /** "img_upload//123/./x.jpg" is the same file as "img_upload/123/x.jpg" - one url for both */
+    public function testCachedUrlNormalisesTheSourcePath(): void
+    {
+        $mc = $this->mc();
+        self::assertSame($mc->getCachedUrl('pT', 'img_upload/123/x.jpg?w=1'), $mc->getCachedUrl('pT', 'img_upload//123/./x.jpg?w=1'));
+        self::assertNotNull($mc->parseRequest($mc->getCachedUrl('pT', 'img_upload//123/./x.jpg?w=1')));
+    }
 }

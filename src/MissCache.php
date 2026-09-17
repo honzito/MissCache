@@ -119,7 +119,8 @@ final class MissCache
         }
 
         [$srcPath, $params] = array_pad(explode('?', $srcWithQuery, 2), 2, '');
-        $srcPath = trim($srcPath, '/');
+        // "a//b" and "a/./b" name the same file as "a/b" - and only that spelling parses back
+        $srcPath = implode('/', array_filter(explode('/', $srcPath), static fn(string $segment): bool => ($segment !== '') && ($segment !== '.')));
 
         // Sources live under the same base as the cache (e.g. img_upload); mirror
         // them RELATIVE to that base so the base is not repeated in the cache path.
@@ -402,6 +403,12 @@ final class MissCache
         $dir  = implode('/', $segments);
         $file = CacheRequest::joinFilename($chunks);
 
+        // getCachedUrl() never emits an empty or "." directory segment; accepting "./+5" or
+        // "//+5" would store an artifact inside the tree of a split marker
+        if (preg_match('~(^|/)\.?(/|$)~', $dir) && ($dir !== '')) {
+            throw new \RuntimeException('Illegal cache path: empty or "." segment');
+        }
+
         // Accept only the split we would have emitted ourselves. Without this, one
         // artifact is reachable under many paths — "+2" vs "+02", a split that was
         // never needed, or chunks cut anywhere — and each of them forges and stores
@@ -429,6 +436,14 @@ final class MissCache
         // Only ever write known static-asset extensions into the public cache.
         if (!in_array($outExt, self::ALLOWED_EXT, true)) {
             throw new \RuntimeException('Illegal output extension');
+        }
+
+        // Only the spelling getCachedUrl() emits: "ph~6Fto.jpg" decodes to the same name as
+        // "photo.jpg", and a ".png" without f=png makes the same image as ".jpg" - each such
+        // alias would be forged and stored as a copy of its own, which purgeSource() never
+        // finds and an anonymous client can multiply at will
+        if ((CacheRequest::buildFilename($srcName, $params, $outExt) !== $file) || ($outExt !== self::outExtFromParams((string) $params))) {
+            throw new \RuntimeException('Non-canonical cache path');
         }
 
         $cacheRoot      = $this->basePath . '/' . $this->cacheSegment . '/';
