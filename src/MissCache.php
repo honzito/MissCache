@@ -411,13 +411,14 @@ final class MissCache
             http_response_code(500);
             return;
         }
-        $headers = self::cacheHeaders($ext, $mtime, $size);
+        $headers = self::cacheHeaders($ext, $mtime, $size, time());
 
         if (self::isClientCacheFresh($mtime)) {
             if (!headers_sent()) {
                 http_response_code(304);
-                header('Last-Modified: ' . $headers['Last-Modified']);
-                header('Cache-Control: ' . $headers['Cache-Control']);
+                foreach (['Last-Modified', 'Cache-Control', 'Expires'] as $name) {
+                    header($name . ': ' . $headers[$name]);
+                }
             }
             return; // 304: no body
         }
@@ -442,7 +443,7 @@ final class MissCache
     private static function serveUnstored(string $bytes, string $ext, int $maxAge = self::CACHE_MAX_AGE): void
     {
         if (!headers_sent()) {
-            foreach (self::unstoredHeaders($ext, strlen($bytes), $maxAge) as $name => $value) {
+            foreach (self::unstoredHeaders($ext, strlen($bytes), $maxAge, time()) as $name => $value) {
                 header($name . ': ' . $value);
             }
         }
@@ -452,33 +453,46 @@ final class MissCache
     /**
      * Headers for {@see serveUnstored()}. Pure (no I/O, no globals) so it is unit-testable.
      *
-     * @return array{Content-Type:string, Content-Length:string, Cache-Control:string, X-Content-Type-Options:string}
+     * Expires rides along with Cache-Control on purpose: Apache's mod_expires leaves a
+     * response alone only when it already carries Expires. Without it, a vhost with
+     * "ExpiresByType image/jpeg access plus 1 week" appends a second Cache-Control
+     * (max-age=604800) - measured on actionapps.org - and a browser may keep the
+     * 60-second fallback for a week.
+     *
+     * @return array{Content-Type:string, Content-Length:string, Cache-Control:string, Expires:string, X-Content-Type-Options:string}
      */
-    private static function unstoredHeaders(string $ext, int $length, int $maxAge): array
+    private static function unstoredHeaders(string $ext, int $length, int $maxAge, int $now): array
     {
         return [
             'Content-Type'   => self::mimeForExt($ext),
             'Content-Length' => (string) $length,
             'Cache-Control'  => 'public, max-age=' . $maxAge,
+            'Expires'        => self::httpDate($now + $maxAge),
             'X-Content-Type-Options' => 'nosniff',
         ];
     }
 
     /**
      * Cache headers for a forged artifact. Pure (no I/O, no globals) so it is
-     * unit-testable.
+     * unit-testable. Expires: see {@see unstoredHeaders()}.
      *
-     * @return array{Content-Type:string, Content-Length:string, Last-Modified:string, Cache-Control:string, X-Content-Type-Options:string}
+     * @return array{Content-Type:string, Content-Length:string, Last-Modified:string, Cache-Control:string, Expires:string, X-Content-Type-Options:string}
      */
-    private static function cacheHeaders(string $ext, int $mtime, int $size): array
+    private static function cacheHeaders(string $ext, int $mtime, int $size, int $now): array
     {
         return [
             'Content-Type'   => self::mimeForExt($ext),
             'Content-Length' => (string) $size,
-            'Last-Modified'  => gmdate('D, d M Y H:i:s', $mtime) . ' GMT',
+            'Last-Modified'  => self::httpDate($mtime),
             'Cache-Control'  => 'public, max-age=' . self::CACHE_MAX_AGE,
+            'Expires'        => self::httpDate($now + self::CACHE_MAX_AGE),
             'X-Content-Type-Options' => 'nosniff',
         ];
+    }
+
+    private static function httpDate(int $timestamp): string
+    {
+        return gmdate('D, d M Y H:i:s', $timestamp) . ' GMT';
     }
 
     /**

@@ -197,29 +197,43 @@ final class MissCacheTest extends TestCase
         self::assertDirectoryDoesNotExist($this->tmp . '/mC');
     }
 
-    /** The fallback is cacheable only briefly; an unstored real artifact as long as a stored one. */
+    /**
+     * The fallback is cacheable only briefly; an unstored real artifact as long as a stored
+     * one. Expires matches max-age: without it mod_expires appends its own week-long
+     * Cache-Control to the response.
+     */
     public function testUnstoredHeaders(): void
     {
-        $fallback = self::invokeStatic('unstoredHeaders', ['png', 91, 60]);
+        $now      = 1_700_000_000;
+        $fallback = self::invokeStatic('unstoredHeaders', ['png', 91, 60, $now]);
         self::assertSame(
-            ['Content-Type' => 'image/png', 'Content-Length' => '91', 'Cache-Control' => 'public, max-age=60', 'X-Content-Type-Options' => 'nosniff'],
+            [
+                'Content-Type'           => 'image/png',
+                'Content-Length'         => '91',
+                'Cache-Control'          => 'public, max-age=60',
+                'Expires'                => gmdate('D, d M Y H:i:s', $now + 60) . ' GMT',
+                'X-Content-Type-Options' => 'nosniff',
+            ],
             $fallback
         );
 
-        $artifact = self::invokeStatic('unstoredHeaders', ['jpg', 5043, 604800]);
+        $artifact = self::invokeStatic('unstoredHeaders', ['jpg', 5043, 604800, $now]);
         self::assertSame('public, max-age=604800', $artifact['Cache-Control']);
+        self::assertSame(gmdate('D, d M Y H:i:s', $now + 604800) . ' GMT', $artifact['Expires']);
         self::assertArrayNotHasKey('Last-Modified', $artifact, 'no file behind it, nothing for a validator to line up with');
     }
 
     public function testCacheHeadersShape(): void
     {
-        $mtime = 1_700_000_000;
-        $headers = self::invokeStatic('cacheHeaders', ['webp', $mtime, 5043]);
+        $mtime   = 1_700_000_000;
+        $now     = $mtime + 3600;
+        $headers = self::invokeStatic('cacheHeaders', ['webp', $mtime, 5043, $now]);
 
         self::assertSame('image/webp', $headers['Content-Type']);
         self::assertSame('5043', $headers['Content-Length']);
         self::assertSame(gmdate('D, d M Y H:i:s', $mtime) . ' GMT', $headers['Last-Modified']);
         self::assertSame('public, max-age=604800', $headers['Cache-Control']);
+        self::assertSame(gmdate('D, d M Y H:i:s', $now + 604800) . ' GMT', $headers['Expires']);
         // No ETag: the static server issues its own; a PHP one would only fail to match.
         self::assertArrayNotHasKey('ETag', $headers);
     }
