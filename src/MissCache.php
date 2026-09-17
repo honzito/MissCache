@@ -172,7 +172,10 @@ final class MissCache
             return true;
         }
 
-        $bytes = $plugin->generate($req);
+        // A source which is not there - deleted, not uploaded yet, or a filesystem refusing
+        // PHP for a moment - cannot yield an artifact, so the plugin is not even asked
+        $version = self::sourceVersion($req->sourceFsPath);
+        $bytes   = ($version === null) ? null : $plugin->generate($req);
         if ($bytes === null || $bytes === '') {
             // Nothing could be forged: send the plugin's stand-in, unstored and briefly
             // cacheable - see PluginInterface::fallback() for why it must never be stored.
@@ -189,12 +192,85 @@ final class MissCache
         // (full disk, read-only mount, a name over the filesystem's NAME_MAX, wrong
         // permissions) must still answer with the artifact it just forged. Failing
         // to store costs performance — this miss will recur — never a broken image.
-        if (is_file($req->filesystemPath)) {
+        if (self::store($req, $bytes, $version)) {
             $this->serve($req->filesystemPath, $req->outExt);
         } else {
             self::serveUnstored($bytes, $req->outExt);
         }
         return true;
+    }
+
+    /**
+     * Store the artifact at $req->filesystemPath, atomically: written to a temp file in the
+     * same directory and renamed, so a concurrent request never serves half of it.
+     *
+     * The temp name is short and independent of the target ("mc<hex>.tmp"): a suffix on a
+     * name already at NAME_MAX would fail to write an artifact whose own name fits. ".tmp"
+     * is outside ALLOWED_EXT, so it is never served, and the purge reaps what a crash leaves.
+     *
+     * Stored first and the source checked after: an application replacing the source calls
+     * purgeSource() after the replacement, so either that purge finds this file, or this
+     * check finds the source changed and drops the artifact of the old content - checking
+     * before the store would leave a gap.
+     *
+     * @param list<int> $version sourceVersion() of the source before the artifact was generated
+     * @return bool whether the artifact is on disk
+     */
+    private static function store(CacheRequest $req, string $bytes, array $version): bool
+    {
+        $dir = \dirname($req->filesystemPath);
+        if (!self::makeDirectory($dir, $req->dirMode)) {
+            return false;
+        }
+        $tmp = $dir . '/mc' . bin2hex(random_bytes(8)) . '.tmp';
+        if ((@file_put_contents($tmp, $bytes) !== \strlen($bytes)) || !@rename($tmp, $req->filesystemPath)) {
+            @unlink($tmp);
+            return false;
+        }
+        if (self::sourceVersion($req->sourceFsPath) !== $version) {
+            @unlink($req->filesystemPath);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * mkdir -p which applies $mode whatever the umask of the process and keeps the setgid bit
+     * a new directory inherits: PHP users sharing the cache (two application trees, cron)
+     * store into each other's directories through the group, and a umask of 022 would take
+     * that away. Silent on failure - a warning here would land in front of the artifact bytes.
+     */
+    private static function makeDirectory(string $dir, int $mode): bool
+    {
+        if (is_dir($dir)) {
+            return true;
+        }
+        $parent = \dirname($dir);
+        if (($parent === $dir) || !self::makeDirectory($parent, $mode)) {
+            return false;
+        }
+        if (!@mkdir($dir, $mode) && !is_dir($dir)) {   // is_dir() again: a parallel forge may have made it meanwhile
+            return false;
+        }
+        @chmod($dir, $mode | (@fileperms($dir) & 0o2000));   // best-effort: one made by another user needs no chmod from us
+        return true;
+    }
+
+    /**
+     * What tells a replaced (or deleted) source from the one before - one stat.
+     *
+     * @return list<int>|null inode, size and mtime; [] when the request names no source file
+     *                        (nothing to look at, nothing to compare); null when the source
+     *                        is not a file PHP can see right now
+     */
+    private static function sourceVersion(?string $path): ?array
+    {
+        if ($path === null) {
+            return [];
+        }
+        clearstatcache(true, $path);
+        $stat = @stat($path);
+        return (($stat === false) || (($stat['mode'] & 0o170000) !== 0o100000)) ? null : [$stat['ino'], $stat['size'], $stat['mtime']];
     }
 
     /**

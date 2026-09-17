@@ -116,7 +116,7 @@ the old content stay served until `purge()` expires them. (Browsers that fetched
 one keep it for its `max-age` either way; only a version in the URL would change that.)
 
 On a miss, `PhpThumbPlugin` fetches the image from the phpThumb entry point over a
-local HTTP subrequest (once per artifact) and writes it to the mirrored cache path.
+local HTTP subrequest (once per artifact); MissCache writes it to the mirrored cache path.
 
 When nothing can be forged — the source is missing or unreadable, or the entry
 point fails — the dispatcher answers the plugin's *fallback* (for `PhpThumbPlugin`
@@ -164,7 +164,7 @@ A plugin implements `MissCache\Util\PluginInterface`:
 
 ```php
 public function getRoutePrefix(): string;          // e.g. "pT"
-public function generate(CacheRequest $req): ?string; // return the bytes (and store them at $req->filesystemPath, best-effort); null = nothing could be forged
+public function generate(CacheRequest $req): ?string; // return the bytes - MissCache stores them (best-effort); null = nothing could be forged
 public function fallback(CacheRequest $req): ?string; // what to answer instead - served unstored, briefly cacheable; null = 500, so cover every output type you emit
 ```
 

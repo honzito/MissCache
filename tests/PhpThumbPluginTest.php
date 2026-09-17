@@ -38,15 +38,10 @@ final class PhpThumbPluginTest extends TestCase
         @rmdir($this->tmp);
     }
 
-    /** A request whose source is $this->tmp/img_upload/123/photo.jpg and whose artifact goes to $target. */
-    private function request(string $target, bool $sourceExists): CacheRequest
+    /** A request for img_upload/123/photo.jpg whose artifact goes to $target - the plugin never looks at the source file. */
+    private function request(string $target): CacheRequest
     {
-        $srcDir = $this->tmp . '/img_upload/123';
-        mkdir($srcDir, 0775, true);
-        if ($sourceExists) {
-            file_put_contents($srcDir . '/photo.jpg', 'source');
-        }
-        return new CacheRequest('pT', '123', 'photo.jpg', 'w=10', 'jpg', $target, 0775, 'img_upload', $srcDir . '/photo.jpg');
+        return new CacheRequest('pT', '123', 'photo.jpg', 'w=10', 'jpg', $target, 0775, 'img_upload', null);
     }
 
     /** A plugin whose "HTTP" answers every request with the given status and body. */
@@ -73,44 +68,6 @@ final class PhpThumbPluginTest extends TestCase
         self::assertNull($plugin->fallback($req), 'no blank for a type we never emit');
     }
 
-    /**
-     * An upload replacing the source while phpThumb renders it has purged the cache already -
-     * storing the image of the old file now would bring it back for good. It is still served.
-     */
-    public function testSourceReplacedDuringTheRenderIsServedButNotStored(): void
-    {
-        $target = $this->tmp . '/img_upload/mC/pT/123/photo.jpg!w=10.jpg';
-        $req    = $this->request($target, sourceExists: true);
-        $source = $req->sourceFsPath;
-        $plugin = new PhpThumbPlugin('https://example.org/img.php', 'pT', static function (string $url) use ($source): array {
-            // the way Files::uploadFile() replaces it: a new file renamed over the old one
-            file_put_contents("$source.new", 'the new photo');
-            rename("$source.new", $source);
-            return [200, self::JPEG];
-        });
-
-        self::assertSame(self::JPEG, $plugin->generate($req));
-        self::assertFileDoesNotExist($target);
-    }
-
-    /** the directories on the way are group-writable whatever the umask: another PHP user stores and purges there too */
-    public function testDirectoriesMadeForAnArtifactGetTheirModeWhateverTheUmask(): void
-    {
-        $target = $this->tmp . '/img_upload/mC/pT/123/sub/photo.jpg!w=10.jpg';
-        $req    = $this->request($target, sourceExists: true);
-        $umask  = umask(0o022);
-        try {
-            self::plugin(200, self::JPEG)->generate($req);
-        } finally {
-            umask($umask);
-        }
-
-        self::assertStringEqualsFile($target, self::JPEG);
-        foreach (['/img_upload/mC', '/img_upload/mC/pT', '/img_upload/mC/pT/123', '/img_upload/mC/pT/123/sub'] as $dir) {
-            self::assertSame(0o775, fileperms($this->tmp . $dir) & 0o777, $dir);
-        }
-    }
-
     /** @return array<string, array{0: string}> */
     public static function foreignParams(): array
     {
@@ -129,23 +86,19 @@ final class PhpThumbPluginTest extends TestCase
     #[DataProvider('foreignParams')]
     public function testParametersNoArtifactIsMadeWithAreRefused(string $params): void
     {
-        $cacheDir = $this->tmp . '/img_upload/mC/pT/123';
-        $srcDir   = $this->tmp . '/img_upload/123';
-        mkdir($srcDir, 0775, true);
-        file_put_contents("$srcDir/photo.jpg", 'source');
-        $req    = new CacheRequest('pT', '123', 'photo.jpg', $params, 'jpg', "$cacheDir/photo.jpg!x.jpg", 0775, 'img_upload', "$srcDir/photo.jpg");
+        $req    = new CacheRequest('pT', '123', 'photo.jpg', $params, 'jpg', $this->tmp . '/img_upload/mC/pT/123/photo.jpg!x.jpg', 0775, 'img_upload', null);
         $plugin = new PhpThumbPlugin('https://example.org/img.php', 'pT', static function (string $url): array {
             self::fail("no request to the entry point expected, got $url");
         });
 
         self::assertNull($plugin->generate($req));
-        self::assertDirectoryDoesNotExist($cacheDir);
     }
 
-    public function testForgedArtifactIsStoredAndReturned(): void
+    /** the plugin only makes the bytes - MissCache stores them (MissCacheTest) */
+    public function testForgedArtifactIsReturnedAndNotWritten(): void
     {
         $target = $this->tmp . '/img_upload/mC/pT/123/photo.jpg!w=10.jpg';
-        $req    = $this->request($target, sourceExists: true);
+        $req    = $this->request($target);
         $asked  = null;
         $plugin = new PhpThumbPlugin('https://example.org/img.php', 'pT', static function (string $url) use (&$asked): array {
             $asked = $url;
@@ -156,7 +109,7 @@ final class PhpThumbPluginTest extends TestCase
 
         self::assertSame('https://example.org/img.php?src=/img_upload/123/photo.jpg&w=10', $asked);
         self::assertSame(self::JPEG, $bytes);
-        self::assertStringEqualsFile($target, self::JPEG);
+        self::assertDirectoryDoesNotExist($this->tmp . '/img_upload/mC');
     }
 
     /**
@@ -182,32 +135,13 @@ final class PhpThumbPluginTest extends TestCase
         self::assertFileExists("$cacheDir/same-size.jpg!w=10.jpg", 'size alone must not condemn a file');
     }
 
-    /**
-     * A source PHP cannot see - deleted, not uploaded yet, or a filesystem refusing
-     * us for a moment - yields null without a round-trip, and nothing on disk. A
-     * stored blank used to outlive the failure: the purge is keyed on recency, so a
-     * blank on a live page was refreshed by every hit and never reclaimed.
-     */
-    public function testUnreadableSourceReturnsNullWithoutHttpAndStoresNothing(): void
-    {
-        $cacheDir = $this->tmp . '/img_upload/mC/pT/123';
-        $req      = $this->request($cacheDir . '/photo.jpg!w=10.jpg', sourceExists: false);
-        $plugin   = new PhpThumbPlugin('https://example.org/img.php', 'pT', static function (string $url): array {
-            self::fail("no HTTP request expected for an unreadable source, got $url");
-        });
-
-        self::assertNull($plugin->generate($req));
-        self::assertDirectoryDoesNotExist($cacheDir);
-    }
-
     #[DataProvider('failedFetches')]
-    public function testFailedFetchReturnsNullAndStoresNothing(int $code, string|false $body, bool $logged): void
+    public function testFailedFetchReturnsNull(int $code, string|false $body, bool $logged): void
     {
-        $cacheDir = $this->tmp . '/img_upload/mC/pT/123';
-        $req      = $this->request($cacheDir . '/photo.jpg!w=10.jpg', sourceExists: true);
+        $req = $this->request($this->tmp . '/img_upload/mC/pT/123/photo.jpg!w=10.jpg');
 
         self::assertNull(self::plugin($code, $body)->generate($req));
-        self::assertDirectoryDoesNotExist($cacheDir);
+
         // An unusable image is routine and silent; an unreachable entry point is a
         // setup problem or an outage, and this line is the operator's only trace of it.
         self::assertSame($logged, str_contains((string) @file_get_contents($this->tmp . '/error.log'), 'entry point unreachable'));
@@ -222,55 +156,5 @@ final class PhpThumbPluginTest extends TestCase
             'entry point unreachable'               => [0, false, true],
             'empty 200 body'                        => [200, '', false],
         ];
-    }
-
-    /**
-     * A cache that cannot STORE must still DELIVER.
-     *
-     * generate() returns the forged bytes even when nothing reached the disk, so a
-     * failed store (full disk, read-only mount, a name over the filesystem's
-     * NAME_MAX, wrong permissions) costs a repeated miss and never a broken image.
-     * Before this, the bytes were dropped on the floor and the dispatcher answered
-     * 500 forever — which is how images on biom.cz vanished once their names grew.
-     *
-     * The store is forced to fail with a name past NAME_MAX (255 bytes), the one
-     * failure mode reproducible without depending on the uid the tests run as.
-     */
-    public function testArtifactIsReturnedEvenWhenItCannotBeStored(): void
-    {
-        $cacheDir = $this->tmp . '/img_upload/mC/pT/123';
-        mkdir($cacheDir, 0775, true);
-        $target = $cacheDir . '/' . str_repeat('a', 300) . '.jpg';   // unstorable anywhere
-        $req    = $this->request($target, sourceExists: true);
-
-        $bytes = self::plugin(200, self::JPEG)->generate($req);
-
-        self::assertSame(self::JPEG, $bytes, 'a cache that cannot store must still deliver');
-        self::assertFileDoesNotExist($target);
-        self::assertSame([], glob($cacheDir . '/*.tmp') ?: [], 'a failed store leaves no temp litter');
-    }
-
-    /**
-     * A name the filesystem accepts must actually be stored.
-     *
-     * The temp file used to be "<target>.tmp.<hex>", adding 21 bytes to a name that
-     * may already be at NAME_MAX: a 235..255-byte artifact then failed to write with
-     * ENAMETOOLONG even though the target itself would have fit. The temp name is now
-     * short and independent of the target, so the whole budget is available.
-     */
-    public function testNameNearTheFilesystemLimitIsStored(): void
-    {
-        $cacheDir = $this->tmp . '/img_upload/mC/pT/123';
-        mkdir($cacheDir, 0775, true);
-        $name   = str_repeat('a', 250) . '.jpg';   // 254 bytes: fits, old temp name did not
-        $target = $cacheDir . '/' . $name;
-        self::assertLessThanOrEqual(255, \strlen($name), 'test premise: the name itself is storable');
-        $req = $this->request($target, sourceExists: true);
-
-        $bytes = self::plugin(200, self::JPEG)->generate($req);
-
-        self::assertSame(self::JPEG, $bytes);
-        self::assertFileExists($target, 'a name within NAME_MAX must reach the disk');
-        self::assertStringEqualsFile($target, self::JPEG);
     }
 }

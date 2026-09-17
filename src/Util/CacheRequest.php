@@ -30,7 +30,7 @@ final class CacheRequest
         public readonly string $filesystemPath, // absolute path where the artifact must be written
         public readonly int $dirMode = 0775,    // mode for directories created on the way to filesystemPath
         public readonly string $srcBase = '',   // docroot-relative base shared by cache+sources (e.g. "img_upload"), re-added to rebuild src
-        public readonly ?string $sourceFsPath = null // absolute path of the source file on disk, when resolvable; lets a plugin short-circuit a known-missing source
+        public readonly ?string $sourceFsPath = null // absolute path of the source file on disk, when resolvable; MissCache skips the plugin for a missing one and drops an artifact whose source changed meanwhile
     ) {}
 
     /** Reconstruct the exact raw query string for the backend (e.g. "src=/img_upload/123/photo.jpg&w=150&h=150"). */

@@ -12,6 +12,8 @@ use PHPUnit\Framework\TestCase;
 
 final class MissCacheTest extends TestCase
 {
+    private const JPEG = "\xFF\xD8\xFF\xE0forged-thumbnail-bytes";
+
     private string $tmp;
 
     protected function setUp(): void
@@ -195,6 +197,110 @@ final class MissCacheTest extends TestCase
         self::assertSame('', $out);
         self::assertSame(500, http_response_code());
         self::assertDirectoryDoesNotExist($this->tmp . '/mC');
+    }
+
+    /**
+     * The output of handleRequest($path) on a cache in $this->tmp whose phpThumb entry point
+     * answers $fetch - with the source file $this->tmp/$source.
+     *
+     * @param \Closure(string): array{0:int,1:string|false} $fetch
+     */
+    private function dispatch(string $path, \Closure $fetch, string $source = '123/photo.jpg'): string
+    {
+        @mkdir(\dirname("$this->tmp/$source"), 0775, true);
+        file_put_contents("$this->tmp/$source", 'source');
+        $mc = new MissCache('https://example.org/img_upload', $this->tmp, 'mC', 0775, [new PhpThumbPlugin('https://example.org/img.php', 'pT', $fetch)]);
+        ob_start();
+        try {
+            self::assertTrue($mc->handleRequest($path));
+        } finally {
+            $out = (string) ob_get_clean();
+        }
+        return $out;
+    }
+
+    public function testForgedArtifactIsStoredAndServed(): void
+    {
+        $asked = null;
+        $out   = $this->dispatch('/img_upload/mC/pT/123/photo.jpg!w=10.jpg', static function (string $url) use (&$asked): array {
+            $asked = $url;
+            return [200, self::JPEG];
+        });
+
+        self::assertSame('https://example.org/img.php?src=/img_upload/123/photo.jpg&w=10', $asked);
+        self::assertSame(self::JPEG, $out);
+        self::assertStringEqualsFile($this->tmp . '/mC/pT/123/photo.jpg!w=10.jpg', self::JPEG);
+        self::assertSame([], glob($this->tmp . '/mC/pT/123/*.tmp') ?: [], 'no temp file left behind');
+    }
+
+    /**
+     * An upload replacing the source while the artifact is generated has purged the cache
+     * already - storing the artifact of the old file now would bring it back for good. It
+     * is still served.
+     */
+    public function testSourceReplacedDuringGenerationIsServedButNotStored(): void
+    {
+        $source = $this->tmp . '/123/photo.jpg';
+        $out    = $this->dispatch('/img_upload/mC/pT/123/photo.jpg!w=10.jpg', static function (string $url) use ($source): array {
+            // the way Files::uploadFile() replaces it: a new file renamed over the old one
+            file_put_contents("$source.new", 'the new photo');
+            rename("$source.new", $source);
+            return [200, self::JPEG];
+        });
+
+        self::assertSame(self::JPEG, $out);
+        self::assertFileDoesNotExist($this->tmp . '/mC/pT/123/photo.jpg!w=10.jpg');
+    }
+
+    /** the directories on the way are group-writable whatever the umask: another PHP user stores and purges there too */
+    public function testDirectoriesMadeForAnArtifactGetTheirModeWhateverTheUmask(): void
+    {
+        $umask = umask(0o022);
+        try {
+            $this->dispatch('/img_upload/mC/pT/123/sub/photo.jpg!w=10.jpg', static fn (string $url): array => [200, self::JPEG], '123/sub/photo.jpg');
+        } finally {
+            umask($umask);
+        }
+
+        self::assertStringEqualsFile($this->tmp . '/mC/pT/123/sub/photo.jpg!w=10.jpg', self::JPEG);
+        foreach (['/mC', '/mC/pT', '/mC/pT/123', '/mC/pT/123/sub'] as $dir) {
+            self::assertSame(0o775, fileperms($this->tmp . $dir) & 0o777, $dir);
+        }
+    }
+
+    /**
+     * A cache that cannot STORE must still DELIVER: a failed store (full disk, read-only
+     * mount, a name over NAME_MAX, wrong permissions) costs a repeated miss, never a broken
+     * image - that is how images on biom.cz vanished once their names grew. Forced here by
+     * a directory in the artifact's place, which no rename replaces whatever the uid.
+     */
+    public function testArtifactIsServedEvenWhenItCannotBeStored(): void
+    {
+        $target = $this->tmp . '/mC/pT/123/photo.jpg!w=10.jpg';
+        mkdir($target, 0775, true);
+
+        $out = $this->dispatch('/img_upload/mC/pT/123/photo.jpg!w=10.jpg', static fn (string $url): array => [200, self::JPEG]);
+
+        self::assertSame(self::JPEG, $out, 'a cache that cannot store must still deliver');
+        self::assertDirectoryExists($target);
+        self::assertSame([], glob($this->tmp . '/mC/pT/123/*.tmp') ?: [], 'a failed store leaves no temp litter');
+    }
+
+    /**
+     * A name the filesystem accepts must actually be stored: the temp file used to be
+     * "<target>.tmp.<hex>", 21 bytes over a name already near NAME_MAX, so a 235..255-byte
+     * artifact failed to write although the target itself would have fit.
+     */
+    public function testNameNearTheFilesystemLimitIsStored(): void
+    {
+        $name = str_repeat('a', 241) . '.jpg';
+        $path = (string) parse_url($this->mc()->getCachedUrl('pT', "img_upload/123/$name?w=10"), PHP_URL_PATH);
+        self::assertSame(254, \strlen(basename($path)), 'test premise: one path component near NAME_MAX');
+
+        $out = $this->dispatch($path, static fn (string $url): array => [200, self::JPEG], "123/$name");
+
+        self::assertSame(self::JPEG, $out);
+        self::assertStringEqualsFile($this->tmp . '/mC/pT/123/' . basename($path), self::JPEG);
     }
 
     /**

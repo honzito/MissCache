@@ -7,7 +7,7 @@ use MissCache\Util\PluginInterface;
 
 /**
  * Generates a cache artifact by asking a phpThumb entry point (e.g. AA's
- * img.php) over a local HTTP request and storing the returned image bytes.
+ * img.php) over a local HTTP request; MissCache stores the returned image bytes.
  *
  * A subrequest is used rather than including the entry point because phpThumb
  * serves its own cached file and calls exit(), which would prevent capturing
@@ -94,15 +94,6 @@ final class PhpThumbPlugin implements PluginInterface
             return null;
         }
 
-        // A source PHP cannot see right now - deleted, not uploaded yet, or a filesystem
-        // refusing us for a moment - cannot yield an image, so skip the round-trip. No
-        // need to double-check the parent directory: a wrong "missing" verdict now costs
-        // a 60 s blank, not a permanent file.
-        if ($req->sourceFsPath !== null && !is_file($req->sourceFsPath)) {
-            return null;
-        }
-        $version = self::version($req->sourceFsPath);
-
         $url           = $this->phpThumbEntryUrl . '?' . $req->toRawQueryString(true);
         [$code, $body] = ($this->fetch)($url);
         if ($code === 0) {
@@ -115,26 +106,7 @@ final class PhpThumbPlugin implements PluginInterface
         if ($code < 200 || $code >= 300 || !is_string($body) || $body === '') {
             return null;   // a failure redirect from the entry point: it could not make an image of this source
         }
-        // Store is best-effort; the bytes are the contract either way. Stored first and the
-        // source checked after: an upload replacing it purges the cache after the replacement,
-        // so either that purge finds this file, or this check finds the source changed and
-        // drops the image of the old one - checking before the store would leave a gap.
-        $this->writeFile($req->filesystemPath, $body, $req->dirMode);
-        if (self::version($req->sourceFsPath) !== $version) {
-            @unlink($req->filesystemPath);
-        }
         return $body;
-    }
-
-    /** @return list<int>|null what tells a replaced (or deleted) source from the one before - null when there is no path to look at */
-    private static function version(?string $path): ?array
-    {
-        if ($path === null) {
-            return null;
-        }
-        clearstatcache(true, $path);
-        $stat = @stat($path);
-        return ($stat === false) ? [] : [$stat['ino'], $stat['size'], $stat['mtime']];
     }
 
     /** The shipped 1×1 blank of the requested type (jpeg shares the jpg asset), or null for a type we have none for. */
@@ -147,60 +119,6 @@ final class PhpThumbPlugin implements PluginInterface
         }
         $bytes = @file_get_contents(self::ASSETS . '/blank.' . $ext);
         return $bytes === false ? null : $bytes;
-    }
-
-    /**
-     * Atomically store $bytes at $target (creating parent dirs), so a concurrent
-     * request never serves a half-written file. Best-effort: false only means the
-     * artifact will have to be forged again next time, never that the caller has
-     * nothing to serve.
-     *
-     * The temp name is short and INDEPENDENT of $target — "mc<hex>.tmp" in the same
-     * directory, not "<target>.tmp.<hex>". Suffixing the target used to add 21 bytes
-     * to a name that is already at most NAME_MAX (255) bytes, so a perfectly
-     * storable artifact of 235..255 bytes failed to write with ENAMETOOLONG while
-     * $target itself would have fit. Same directory, so the rename stays atomic;
-     * random, so concurrent forges still never collide. ".tmp" is outside
-     * MissCache::ALLOWED_EXT, so the transient file can never be served as an
-     * artifact, and CachePurger reaps any that a crashed forge leaves behind.
-     */
-    private function writeFile(string $target, string $bytes, int $dirMode): bool
-    {
-        $dir = \dirname($target);
-        if (!self::makeDirectory($dir, $dirMode)) {
-            return false;
-        }
-        $tmp = $dir . '/mc' . bin2hex(random_bytes(8)) . '.tmp';
-        if (@file_put_contents($tmp, $bytes) === false) {
-            return false;
-        }
-        if (!@rename($tmp, $target)) {
-            @unlink($tmp);
-            return false;
-        }
-        return is_file($target);
-    }
-
-    /**
-     * mkdir -p which applies $mode whatever the umask of the process and keeps the setgid bit
-     * a new directory inherits: PHP users sharing the cache (two application trees, cron)
-     * store into each other's directories through the group, and a umask of 022 would take
-     * that away. Silent on failure - a warning here would land in front of the image bytes.
-     */
-    private static function makeDirectory(string $dir, int $mode): bool
-    {
-        if (is_dir($dir)) {
-            return true;
-        }
-        $parent = \dirname($dir);
-        if (($parent === $dir) || !self::makeDirectory($parent, $mode)) {
-            return false;
-        }
-        if (!@mkdir($dir, $mode) && !is_dir($dir)) {   // is_dir() again: a parallel forge may have made it meanwhile
-            return false;
-        }
-        @chmod($dir, $mode | (@fileperms($dir) & 0o2000));   // best-effort: one made by another user needs no chmod from us
-        return true;
     }
 
     /**

@@ -12,19 +12,12 @@ interface PluginInterface
 
     /**
      * Generate the cache artifact for $req and return its bytes, or null if it
-     * could not be produced at all.
+     * could not be produced at all - the backend failed, or the request is one no
+     * artifact is made for. The caller answers with {@see fallback()} then.
      *
-     * Implementations SHOULD also store the artifact at $req->filesystemPath so
-     * later requests are served statically, but storing is explicitly allowed to
-     * fail: returning the bytes is the contract, writing them is the optimisation.
-     * A cache that cannot store must still deliver — the caller serves whatever
-     * comes back here even when nothing reached the disk (full disk, read-only
-     * mount, a name over the filesystem's NAME_MAX, ...), so such a condition
-     * costs performance and never a broken image.
-     *
-     * Returning null means no artifact could be forged - the source is missing or
-     * unreadable, or the backend failed. Store nothing in that case; the caller
-     * answers with {@see fallback()} instead.
+     * Write nothing: the caller stores the bytes at $req->filesystemPath (best-effort -
+     * a cache that cannot store still delivers them) and serves them. It does not ask
+     * at all when $req->sourceFsPath names a file which is not there.
      */
     public function generate(CacheRequest $req): ?string;
 
