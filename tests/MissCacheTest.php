@@ -269,6 +269,14 @@ final class MissCacheTest extends TestCase
         return $m->invoke(null, ...$args);
     }
 
+    /** a thumbnail is no source: "mC/pT/mC/pT/..." would nest without end, out of purgeSource()'s reach */
+    public function testParseRequestRejectsASourceInsideTheCache(): void
+    {
+        $mc = $this->mc();
+        $this->expectException(\RuntimeException::class);
+        $mc->parseRequest($mc->getCachedUrl('pT', 'img_upload/mC/pT/123/photo.jpg!w=150.jpg?w=10'));
+    }
+
     public function testParseRequestRejectsPercentEncoding(): void
     {
         // Percent-encoding never appears in a real cache path (tilde-hex uses ~HH).

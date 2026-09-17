@@ -111,6 +111,36 @@ final class PhpThumbPluginTest extends TestCase
         }
     }
 
+    /** @return array<string, array{0: string}> */
+    public static function foreignParams(): array
+    {
+        return [
+            'second source'           => ['w=150&src=/etc/other.jpg'],
+            'second source, spaced'   => ['w=150& src=/etc/other.jpg'],
+            'remote source'           => ['src=http://10.0.0.1/x.jpg&w=150'],
+            'image of no source'      => ['new=FFFFFF&w=20&h=20'],
+            'debug text'              => ['w=150&phpThumbDebug=9'],
+            'forced download'         => ['w=150&down=x.jpg'],
+        ];
+    }
+
+    /** a hand-crafted url must not get another image stored under this source's name */
+    #[DataProvider('foreignParams')]
+    public function testParametersNoArtifactIsMadeWithAreRefused(string $params): void
+    {
+        $cacheDir = $this->tmp . '/img_upload/mC/pT/123';
+        $srcDir   = $this->tmp . '/img_upload/123';
+        mkdir($srcDir, 0775, true);
+        file_put_contents("$srcDir/photo.jpg", 'source');
+        $req    = new CacheRequest('pT', '123', 'photo.jpg', $params, 'jpg', "$cacheDir/photo.jpg!x.jpg", 0775, 'img_upload', "$srcDir/photo.jpg");
+        $plugin = new PhpThumbPlugin('https://example.org/img.php', 'pT', static function (string $url): array {
+            self::fail("no request to the entry point expected, got $url");
+        });
+
+        self::assertNull($plugin->generate($req));
+        self::assertDirectoryDoesNotExist($cacheDir);
+    }
+
     public function testForgedArtifactIsStoredAndReturned(): void
     {
         $target = $this->tmp . '/img_upload/mC/pT/123/photo.jpg!w=10.jpg';

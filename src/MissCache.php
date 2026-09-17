@@ -119,8 +119,7 @@ final class MissCache
         }
 
         [$srcPath, $params] = array_pad(explode('?', $srcWithQuery, 2), 2, '');
-        // "a//b" and "a/./b" name the same file as "a/b" - and only that spelling parses back
-        $srcPath = implode('/', array_filter(explode('/', $srcPath), static fn(string $segment): bool => ($segment !== '') && ($segment !== '.')));
+        $srcPath = trim(self::collapseSegments("/$srcPath"), '/');   // the only spelling parseRequest() accepts - a leading "./" too
 
         // Sources live under the same base as the cache (e.g. img_upload); mirror
         // them RELATIVE to that base so the base is not repeated in the cache path.
@@ -253,7 +252,7 @@ final class MissCache
      */
     public function purgeSource(string $sourcePath): int
     {
-        $sourcePath = (string) preg_replace('~/(?:\.?/)+~', '/', $sourcePath);   // "a//b", "a/./b" are "a/b"
+        $sourcePath = self::collapseSegments($sourcePath);
         $relative   = str_starts_with($sourcePath, $this->basePath . '/') ? substr($sourcePath, strlen($this->basePath) + 1) : '';
         if ($relative === '' || str_contains($relative, "\0") || preg_match('~(^|/)\.{0,2}(/|$)~', $relative)) {
             return 0;   // not under the base, or a ".." (or empty) segment which could leave the cache tree
@@ -426,6 +425,11 @@ final class MissCache
         if (preg_match('~(^|/)\.?(/|$)~', $dir) && ($dir !== '')) {
             throw new \RuntimeException('Illegal cache path: empty or "." segment');
         }
+        // an artifact is no source: its own artifacts would nest without end, and no
+        // purgeSource() of the original would ever find them
+        if (($dir === $this->cacheSegment) || str_starts_with($dir, $this->cacheSegment . '/')) {
+            throw new \RuntimeException('Illegal cache path: the source lies in the cache');
+        }
 
         // Accept only the split we would have emitted ourselves. Without this, one
         // artifact is reachable under many paths — "+2" vs "+02", a split that was
@@ -479,6 +483,12 @@ final class MissCache
         $sourceFsPath = $this->basePath . '/' . ($dir !== '' ? $dir . '/' : '') . $srcName;
 
         return new CacheRequest($routePrefix, $dir, $srcName, $params, $outExt, $filesystemPath, $this->dirMode, $this->srcBase, $sourceFsPath);
+    }
+
+    /** "a//b" and "a/./b" name the same file as "a/b" */
+    private static function collapseSegments(string $path): string
+    {
+        return (string) preg_replace('~/(?:\.?/)+~', '/', $path);
     }
 
     /**

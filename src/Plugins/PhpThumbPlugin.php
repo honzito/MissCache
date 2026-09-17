@@ -28,6 +28,9 @@ final class PhpThumbPlugin implements PluginInterface
     /** The shipped 1×1 blanks, one per output type. */
     private const ASSETS = __DIR__ . '/../../assets';
 
+    /** phpThumb parameters no artifact is made with - see generate() */
+    private const FOREIGN_PARAMS = ['src' => true, 'new' => true, 'phpThumbDebug' => true, 'nocache' => true, 'down' => true, 'sia' => true];
+
     /** @var \Closure(string): array{0:int,1:string|false} */
     private readonly \Closure $fetch;
 
@@ -77,6 +80,16 @@ final class PhpThumbPlugin implements PluginInterface
 
     public function generate(CacheRequest $req): ?string
     {
+        // Parameters an application never puts into a cache url, only a hand-crafted one: a
+        // second src (phpThumb takes the last) renders another file - or a remote url - under
+        // this source's name, where purgeSource() of the real one never finds it; new makes an
+        // image of no source; the rest answer text or headers a static file cannot keep.
+        // parse_str() is what the entry point reads the query with, so every spelling counts.
+        parse_str((string) $req->params, $params);
+        if (array_intersect_key($params, self::FOREIGN_PARAMS)) {
+            return null;
+        }
+
         // A source PHP cannot see right now - deleted, not uploaded yet, or a filesystem
         // refusing us for a moment - cannot yield an image, so skip the round-trip. No
         // need to double-check the parent directory: a wrong "missing" verdict now costs
