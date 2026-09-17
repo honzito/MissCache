@@ -121,6 +121,17 @@ final class MissCachePurgeSourceTest extends TestCase
         ];
     }
 
+    /** a configured base with "//" inside is the same directory as the collapsed one */
+    public function testBaseSpelledWithDoubleSlashStillFindsTheArtifacts(): void
+    {
+        $sloppy = str_replace('/misscache_purgesource_', '//misscache_purgesource_', $this->base);
+        $mc     = new MissCache('https://example.org/img_upload', $sloppy, 'mC', 0775, [new PhpThumbPlugin('https://example.org/img.php')], self::SEGMENT);
+        $gone   = $this->artifact('123/photo.jpg', 'w=150');
+
+        self::assertSame(1, $mc->purgeSource($sloppy . '/123/photo.jpg'));
+        self::assertFileDoesNotExist($gone);
+    }
+
     /** "a//b" and "a/./b" name the very same file */
     public function testSloppyButEqualSpellingOfTheSourceIsFound(): void
     {

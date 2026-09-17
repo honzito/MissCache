@@ -111,11 +111,13 @@ final class PhpThumbPlugin implements PluginInterface
         if ($code < 200 || $code >= 300 || !is_string($body) || $body === '') {
             return null;   // a failure redirect from the entry point: it could not make an image of this source
         }
-        // Store is best-effort; the bytes are the contract either way. Not at all when the
-        // source changed while phpThumb rendered it: the upload which replaced it has purged
-        // the cache already (MissCache::purgeSource()), and this image is of the old one.
-        if (self::version($req->sourceFsPath) === $version) {
-            $this->writeFile($req->filesystemPath, $body, $req->dirMode);
+        // Store is best-effort; the bytes are the contract either way. Stored first and the
+        // source checked after: an upload replacing it purges the cache after the replacement,
+        // so either that purge finds this file, or this check finds the source changed and
+        // drops the image of the old one - checking before the store would leave a gap.
+        $this->writeFile($req->filesystemPath, $body, $req->dirMode);
+        if (self::version($req->sourceFsPath) !== $version) {
+            @unlink($req->filesystemPath);
         }
         return $body;
     }

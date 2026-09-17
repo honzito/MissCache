@@ -269,6 +269,16 @@ final class MissCacheTest extends TestCase
         return $m->invoke(null, ...$args);
     }
 
+    /** a base url spelled with "//" inside is stripped as configured - collapsing it first moved every cache url */
+    public function testBaseWithDoubleSlashIsStrippedAsWritten(): void
+    {
+        $mc  = new MissCache('https://x.cz/web//img_upload', '/srv/web/img_upload', 'mC', 0775, [new PhpThumbPlugin('https://x.cz/img.php')]);
+        $url = $mc->getCachedUrl('pT', 'web//img_upload/123//x.jpg?w=1');
+
+        self::assertSame('https://x.cz/web//img_upload/mC/pT/123/x.jpg!w=1.jpg', $url);
+        self::assertSame('/srv/web/img_upload/123/x.jpg', $mc->parseRequest((string) parse_url($url, PHP_URL_PATH))?->sourceFsPath);
+    }
+
     /** a thumbnail is no source: "mC/pT/mC/pT/..." would nest without end, out of purgeSource()'s reach */
     public function testParseRequestRejectsASourceInsideTheCache(): void
     {

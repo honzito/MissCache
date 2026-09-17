@@ -119,7 +119,7 @@ final class MissCache
         }
 
         [$srcPath, $params] = array_pad(explode('?', $srcWithQuery, 2), 2, '');
-        $srcPath = trim(self::collapseSegments("/$srcPath"), '/');   // the only spelling parseRequest() accepts - a leading "./" too
+        $srcPath = trim($srcPath, '/');
 
         // Sources live under the same base as the cache (e.g. img_upload); mirror
         // them RELATIVE to that base so the base is not repeated in the cache path.
@@ -127,6 +127,8 @@ final class MissCache
         if ($this->srcBase !== '' && str_starts_with($srcPath, $this->srcBase . '/')) {
             $srcPath = substr($srcPath, strlen($this->srcBase) + 1);
         }
+        // below the base (spelled as configured) "a//b" and "a/./b" are "a/b" - the only spelling parseRequest() accepts
+        $srcPath = trim(self::collapseSegments("/$srcPath"), '/');
 
         $slash   = strrpos($srcPath, '/');
         $srcDir  = $slash === false ? '' : substr($srcPath, 0, $slash);
@@ -253,7 +255,8 @@ final class MissCache
     public function purgeSource(string $sourcePath): int
     {
         $sourcePath = self::collapseSegments($sourcePath);
-        $relative   = str_starts_with($sourcePath, $this->basePath . '/') ? substr($sourcePath, strlen($this->basePath) + 1) : '';
+        $basePath   = self::collapseSegments($this->basePath);   // both spelled alike, whatever the config wrote
+        $relative   = str_starts_with($sourcePath, $basePath . '/') ? substr($sourcePath, strlen($basePath) + 1) : '';
         if ($relative === '' || str_contains($relative, "\0") || preg_match('~(^|/)\.{0,2}(/|$)~', $relative)) {
             return 0;   // not under the base, or a ".." (or empty) segment which could leave the cache tree
         }
