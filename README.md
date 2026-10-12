@@ -135,6 +135,9 @@ directory to the dispatcher (`public/misscache.php`, or — inside APC-AA —
 `handleRequest()`). The dispatcher reads `$_SERVER['REQUEST_URI']`, so nothing
 extra needs to be passed.
 
+A host that routes every request there still works — a stored artifact is read from
+disk, not forged again — but each image then costs a PHP request.
+
 ### Nginx
 
 ```nginx

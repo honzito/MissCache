@@ -148,7 +148,8 @@ final class MissCache
 
     /**
      * Request-time: handle a request for a (missing) cache artifact. Generates it
-     * via the matching plugin and streams it to the client.
+     * via the matching plugin and streams it to the client; one stored already is read
+     * from disk.
      *
      * @return bool true if the request was a MissCache URL and was handled (generated &
      *              served, the plugin's fallback served, or answered with an error status);
@@ -172,6 +173,15 @@ final class MissCache
             return true;
         }
 
+        // The web server answers a stored artifact itself, so one asked for here comes from a
+        // host which does not serve the cache directory: read it rather than forge - and write -
+        // it again on every request
+        $stored = $this->readStored($req->filesystemPath);
+        if ($stored !== '') {
+            self::serve($req->filesystemPath, $req->outExt, $stored);
+            return true;
+        }
+
         // A source which is not there - deleted, not uploaded yet, or a filesystem refusing
         // PHP for a moment - cannot yield an artifact, so the plugin is not even asked
         $version = self::sourceVersion($req->sourceFsPath);
@@ -192,7 +202,7 @@ final class MissCache
         // (full disk, read-only mount, a name over the filesystem's NAME_MAX, wrong
         // permissions) must still answer with the artifact it just forged. Failing
         // to store costs performance — this miss will recur — never a broken image.
-        $stored = self::store($req, $bytes, $version);
+        $stored = $this->store($req, $bytes, $version);
         if ($stored === true) {
             self::serve($req->filesystemPath, $req->outExt, $bytes);
         } else {
@@ -218,10 +228,11 @@ final class MissCache
      * @param list<int> $version sourceVersion() of the source before the artifact was generated
      * @return bool|null true stored; false could not store; null the source changed, nothing kept
      */
-    private static function store(CacheRequest $req, string $bytes, array $version): ?bool
+    private function store(CacheRequest $req, string $bytes, array $version): ?bool
     {
         $dir = \dirname($req->filesystemPath);
-        if (!self::makeDirectory($dir, $req->dirMode)) {
+        // the root first - until it exists, inCache() has nothing to measure against
+        if (!self::makeDirectory($this->basePath . '/' . $this->cacheSegment, $req->dirMode) || !$this->inCache($dir) || !self::makeDirectory($dir, $req->dirMode)) {
             return false;
         }
         $tmp = $dir . '/mc' . bin2hex(random_bytes(8)) . '.tmp';
@@ -234,6 +245,47 @@ final class MissCache
             return null;
         }
         return true;
+    }
+
+    /**
+     * Whether $path - or, while it does not exist yet, its deepest existing parent - resolves to
+     * the cache root or inside it. Every site sharing an upload directory can write it, so a
+     * symlink may be planted in the tree - what it points to must be neither served nor written
+     * to, not even by a directory made there. The root itself may be a symlink: an install can
+     * keep the cache on another volume - only deleting there is refused, see purge().
+     */
+    private function inCache(string $path): bool
+    {
+        clearstatcache(true);   // realpath() answers from a per-process cache for up to 120 s - a link planted since would pass
+        while ((($real = @realpath($path)) === false) && (\dirname($path) !== $path)) {
+            $path = \dirname($path);
+        }
+        $root = @realpath($this->basePath . '/' . $this->cacheSegment);
+        return ($root !== false) && ($real !== false) && str_starts_with("$real/", "$root/");
+    }
+
+    /**
+     * The artifact stored at $path; '' when there is none, or it lies outside the cache. Opened
+     * first and checked after, so a link swapped in between shows as another file - PHP has no
+     * openat() or O_NOFOLLOW to rule the swap out.
+     */
+    private function readStored(string $path): string
+    {
+        $fh = is_file($path) ? @fopen($path, 'rb') : false;   // is_file() first: opening a planted FIFO would block
+        if ($fh === false) {
+            return '';
+        }
+        $opened  = fstat($fh);
+        $checked = $this->inCache($path) ? @lstat((string) realpath($path)) : false;   // lstat(): realpath() has resolved every link, one appearing since must not match
+        $bytes   = '';
+        if (\is_array($opened) && \is_array($checked) && (($opened['mode'] & 0o170000) === 0o100000) && ($opened['dev'] === $checked['dev']) && ($opened['ino'] === $checked['ino'])) {
+            $bytes = (string) @stream_get_contents($fh);
+            if (\strlen($bytes) !== $opened['size']) {
+                $bytes = '';   // a short read would be served - and kept by browsers for a week - as a broken image
+            }
+        }
+        fclose($fh);
+        return $bytes;
     }
 
     /**
@@ -602,13 +654,12 @@ final class MissCache
     }
 
     /**
-     * Send the artifact just stored at $path with caching headers. This runs only for the
-     * single miss response; every later request is served statically by the web
-     * server. We emit Last-Modified + Cache-Control (and honour If-Modified-Since
-     * with a 304) so this first response is as cacheable as the static hits that
-     * follow. Last-Modified mirrors the file mtime — the exact validator the web
-     * server uses for the static file — so a client revalidating after the file
-     * goes static gets a clean 304 across the PHP→static boundary. We deliberately
+     * Send the artifact stored at $path with caching headers - the one just forged, or one read
+     * from disk for a host whose web server does not serve the cache directory. We emit
+     * Last-Modified + Cache-Control (and honour If-Modified-Since with a 304) so a response
+     * from PHP is as cacheable as a static hit. Last-Modified mirrors the file mtime — the
+     * exact validator the web server uses for the static file — so a client revalidating
+     * after the file goes static gets a clean 304 across the PHP→static boundary. We deliberately
      * do NOT emit an ETag: the static server computes its own (inode/size/mtime)
      * ETag that we cannot portably reproduce, so a PHP-issued ETag would simply
      * fail to match on the next revalidation and force a needless full download.

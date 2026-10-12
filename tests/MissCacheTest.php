@@ -29,7 +29,7 @@ final class MissCacheTest extends TestCase
             \RecursiveIteratorIterator::CHILD_FIRST
         );
         foreach ($it as $f) {
-            $f->isDir() ? @rmdir($f->getPathname()) : @unlink($f->getPathname());
+            ($f->isDir() && !$f->isLink()) ? @rmdir($f->getPathname()) : @unlink($f->getPathname());
         }
         @rmdir($this->tmp);
     }
@@ -231,6 +231,90 @@ final class MissCacheTest extends TestCase
         self::assertSame(self::JPEG, $out);
         self::assertStringEqualsFile($this->tmp . '/mC/pT/123/photo.jpg!w=10.jpg', self::JPEG);
         self::assertSame([], glob($this->tmp . '/mC/pT/123/*.tmp') ?: [], 'no temp file left behind');
+    }
+
+    /** a host which does not serve the cache directory sends every request here - it must not cost a forge each time */
+    public function testStoredArtifactIsServedFromDisk(): void
+    {
+        mkdir($this->tmp . '/mC/pT/123', 0775, true);
+        file_put_contents($this->tmp . '/mC/pT/123/photo.jpg!w=10.jpg', 'stored');
+
+        $out = $this->dispatch('/img_upload/mC/pT/123/photo.jpg!w=10.jpg', static fn (string $url): array => [200, self::JPEG]);
+
+        self::assertSame('stored', $out);
+    }
+
+    /** another site sharing the upload directory may plant a symlink in the cache - what it points to is neither served nor overwritten */
+    public function testStoredArtifactBehindASymlinkOutOfTheCacheIsNotServed(): void
+    {
+        $outside = $this->tmp . '/outside';
+        mkdir($outside);
+        file_put_contents("$outside/photo.jpg!w=10.jpg", 'secret');
+        mkdir($this->tmp . '/mC/pT', 0775, true);
+        symlink($outside, $this->tmp . '/mC/pT/123');
+
+        $out = $this->dispatch('/img_upload/mC/pT/123/photo.jpg!w=10.jpg', static fn (string $url): array => [200, self::JPEG]);
+
+        self::assertSame(self::JPEG, $out, 'forged, not read through the link');
+        self::assertStringEqualsFile("$outside/photo.jpg!w=10.jpg", 'secret', 'nor stored through it');
+    }
+
+    public function testStoredArtifactWhichIsASymlinkOutOfTheCacheIsNotServed(): void
+    {
+        $outside = $this->tmp . '/outside';
+        mkdir($outside);
+        file_put_contents("$outside/secret.txt", 'secret');
+        mkdir($this->tmp . '/mC/pT/123', 0775, true);
+        symlink("$outside/secret.txt", $this->tmp . '/mC/pT/123/photo.jpg!w=10.jpg');
+
+        $out = $this->dispatch('/img_upload/mC/pT/123/photo.jpg!w=10.jpg', static fn (string $url): array => [200, self::JPEG]);
+
+        self::assertSame(self::JPEG, $out, 'forged, not read through the link');
+        self::assertStringEqualsFile("$outside/secret.txt", 'secret', 'the store replaced the link, not what it points to');
+    }
+
+    /** an install may keep the cache on another volume - only the purge refuses a symlinked root */
+    public function testArtifactIsStoredAndReadThroughASymlinkedCacheRoot(): void
+    {
+        $volume = $this->tmp . '/volume';
+        mkdir($volume);
+        symlink($volume, $this->tmp . '/mC');
+        $fetch = static fn (string $url): array => [200, self::JPEG];
+
+        $this->dispatch('/img_upload/mC/pT/123/photo.jpg!w=10.jpg', $fetch);
+        self::assertStringEqualsFile("$volume/pT/123/photo.jpg!w=10.jpg", self::JPEG);
+
+        file_put_contents("$volume/pT/123/photo.jpg!w=10.jpg", 'stored');
+        self::assertSame('stored', $this->dispatch('/img_upload/mC/pT/123/photo.jpg!w=10.jpg', $fetch));
+    }
+
+    /** a stored artifact the client has already is answered 304 from disk, not forged again with a new date */
+    public function testStoredArtifactAnswersARevalidationWith304(): void
+    {
+        mkdir($this->tmp . '/mC/pT/123', 0775, true);
+        file_put_contents($this->tmp . '/mC/pT/123/photo.jpg!w=10.jpg', 'stored');
+        touch($this->tmp . '/mC/pT/123/photo.jpg!w=10.jpg', 1_000_000_000);
+        $_SERVER['HTTP_IF_MODIFIED_SINCE'] = gmdate('D, d M Y H:i:s', 1_000_000_000) . ' GMT';
+        try {
+            $out = $this->dispatch('/img_upload/mC/pT/123/photo.jpg!w=10.jpg', static fn (string $url): array => [200, self::JPEG]);
+        } finally {
+            unset($_SERVER['HTTP_IF_MODIFIED_SINCE']);
+        }
+
+        self::assertSame('', $out, '304, no body');
+    }
+
+    public function testNoDirectoryIsMadeThroughASymlinkOutOfTheCache(): void
+    {
+        $outside = $this->tmp . '/outside';
+        mkdir($outside);
+        mkdir($this->tmp . '/mC/pT', 0775, true);
+        symlink($outside, $this->tmp . '/mC/pT/123');
+
+        $out = $this->dispatch('/img_upload/mC/pT/123/sub/photo.jpg!w=10.jpg', static fn (string $url): array => [200, self::JPEG], '123/sub/photo.jpg');
+
+        self::assertSame(self::JPEG, $out, 'answered all the same');
+        self::assertDirectoryDoesNotExist("$outside/sub");
     }
 
     /**
