@@ -24,6 +24,21 @@ final class CacheRequestTest extends TestCase
         self::assertSame('a~2Fb', CacheRequest::encode('a/b'));                // '/' stays hex
     }
 
+    public function testEncodeOfEveryByte(): void
+    {
+        for ($b = 0; $b < 256; $b++) {
+            $expected = match (true) {
+                $b === 0x26                         => '~-',
+                ctype_alnum(chr($b)) && $b < 0x80,
+                str_contains('._-=,', chr($b))      => chr($b),
+                default                             => sprintf('~%02X', $b),
+            };
+            self::assertSame($expected, CacheRequest::encode(chr($b)), "byte $b");
+        }
+        // an encoded-looking input is encoded again, not taken for an escape
+        self::assertSame('~2526~7E-~253D', CacheRequest::encode('%26~-%3D'));
+    }
+
     #[DataProvider('roundtripStrings')]
     public function testEncodeDecodeRoundtrip(string $s): void
     {

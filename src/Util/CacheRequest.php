@@ -166,26 +166,9 @@ final class CacheRequest
      */
     public static function encode(string $s): string
     {
-        $out = '';
-        $len = strlen($s);
-        for ($i = 0; $i < $len; $i++) {
-            $b = ord($s[$i]);
-            if ($b === 0x26) {           // & -> ~-  (kept escaped for HTML cleanliness)
-                $out .= '~-';
-                continue;
-            }
-            $safe = ($b >= 0x30 && $b <= 0x39)   // 0-9
-                 || ($b >= 0x41 && $b <= 0x5A)   // A-Z
-                 || ($b >= 0x61 && $b <= 0x7A)   // a-z
-                 || $b === 0x2E || $b === 0x5F || $b === 0x2D   // . _ -
-                 || $b === 0x3D || $b === 0x2C;                 // = ,
-            if ($safe) {
-                $out .= $s[$i];
-            } else {
-                $out .= '~' . strtoupper(str_pad(dechex($b), 2, '0', STR_PAD_LEFT));
-            }
-        }
-        return $out;
+        // rawurlencode() keeps 0-9 A-Z a-z - . _ ~ and writes the rest as %HH - the map turns that
+        // into the form above; a literal % becomes %25, which none of the three-character keys match
+        return strtr(rawurlencode($s), ['%26' => '~-', '%2C' => ',', '%3D' => '=', '%' => '~', '~' => '~7E']);
     }
 
     /** Reverse of {@see encode()}. Throws on a malformed escape sequence. */
