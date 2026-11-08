@@ -408,6 +408,7 @@ final class MissCache
         $srcDir  = $slash === false ? '' : '/' . substr($relative, 0, $slash);
         $srcName = $slash === false ? $relative : substr($relative, $slash + 1);
 
+        clearstatcache(true);   // realpath() answers from a per-process cache for up to 120 s - a link planted since would pass
         $cacheRoot = $this->basePath . '/' . $this->cacheSegment;
         $rootReal  = is_link($cacheRoot) ? false : realpath($cacheRoot);   // a symlinked cache root is not ours to delete in, see purge()
         if ($rootReal === false) {
