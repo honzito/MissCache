@@ -164,10 +164,10 @@ final class PhpThumbPlugin implements PluginInterface
         if ($fp === false) {
             return [0, false];
         }
-        $headers = stream_get_meta_data($fp)['wrapper_data'] ?? [];
+        $headers = stream_get_meta_data($fp)['wrapper_data'] ?? [];   // the header lines of an http(s) answer
         $body    = stream_get_contents($fp);
         fclose($fp);
-        return [self::statusFromHeaders(is_array($headers) ? $headers : []), $body];
+        return [self::statusFromHeaders($headers), $body];
     }
 
     /** Extract the HTTP status code from the response header lines (0 if none). */

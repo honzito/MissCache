@@ -60,10 +60,13 @@ final class MissCacheTest extends TestCase
         self::assertStringEndsWith('.avif', $url);
     }
 
-    /** a template can pass on a NUL from an item; parse_str() throws on one in PHP 8.6 */
-    public function testGetCachedUrlTakesANulByte(): void
+    /** template data can carry a control byte: the url leaves it out, so it can be served */
+    public function testGetCachedUrlDropsControlBytes(): void
     {
-        self::assertStringEndsWith('.png', $this->mc()->getCachedUrl('pT', "img_upload/123/photo.jpg?w=150\0&f=png"));
+        $mc  = $this->mc();
+        $url = $mc->getCachedUrl('pT', "img_upload/123/photo.jpg?w=150\0\n&f=p\tng");
+        self::assertSame($mc->getCachedUrl('pT', 'img_upload/123/photo.jpg?w=150&f=png'), $url);
+        self::assertNotNull($mc->parseRequest($url));
     }
 
     public function testGetCachedUrlUnknownPluginThrows(): void

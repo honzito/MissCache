@@ -119,6 +119,9 @@ final class MissCache
         }
 
         [$srcPath, $params] = array_pad(explode('?', $srcWithQuery, 2), 2, '');
+        // template data can carry a control byte (a NUL, a trailing newline): parseRequest() refuses
+        // a url with one, and PHP 8.6 parse_str() throws on a NUL
+        $params = (string) preg_replace('/[\x00-\x1F\x7F]/', '', $params);
         $srcPath = trim($srcPath, '/');
 
         // Sources live under the same base as the cache (e.g. img_upload); mirror
@@ -596,9 +599,8 @@ final class MissCache
         if ($srcName === '' || strpbrk($srcName, "/\\\0") !== false || str_contains($srcName, '..')) {
             throw new \RuntimeException('Illegal source name');
         }
-        // getCachedUrl() never encodes a control byte into the params (they come from a
-        // template, not from a user), so one is a hand-crafted URL - and CR/LF would
-        // reach the backend query string and the error log as-is.
+        // getCachedUrl() drops control bytes from the params, so one is a hand-crafted URL -
+        // and CR/LF would reach the backend query string and the error log as-is.
         if (preg_match('/[\x00-\x1F\x7F]/', (string) $params)) {
             throw new \RuntimeException('Illegal parameter');
         }
@@ -782,7 +784,7 @@ final class MissCache
         if ($params === '') {
             return 'jpg';
         }
-        parse_str(str_replace("\0", '', $params), $a);   // PHP 8.6 throws on a NUL, which a template can pass on
+        parse_str($params, $a);
         $f = isset($a['f']) ? strtolower((string) $a['f']) : '';
         return match ($f) {
             'png', 'gif', 'webp', 'avif', 'bmp', 'ico' => $f,
