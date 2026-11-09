@@ -142,22 +142,36 @@ final class PhpThumbPlugin implements PluginInterface
             ]);
             $body = curl_exec($ch);
             $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            curl_close($ch);
             return [$code, is_string($body) ? $body : false];
         }
+        return self::streamGet($url);
+    }
 
+    /**
+     * httpGet() without curl. The headers come from the stream: PHP 8.5 deprecates
+     * $http_response_header, and http_get_last_response_headers() needs 8.4.
+     *
+     * @return array{0:int,1:string|false}
+     */
+    private static function streamGet(string $url): array
+    {
         $ctx = stream_context_create(['http' => [
             'timeout'         => 30,
             'follow_location' => 0,
             'ignore_errors'   => true, // capture the body/status even on a non-2xx response
         ]]);
-        $body = @file_get_contents($url, false, $ctx);
-        $code = $this->statusFromHeaders($http_response_header ?? []);
-        return [$code, is_string($body) ? $body : false];
+        $fp = @fopen($url, 'r', false, $ctx);
+        if ($fp === false) {
+            return [0, false];
+        }
+        $headers = stream_get_meta_data($fp)['wrapper_data'] ?? [];
+        $body    = stream_get_contents($fp);
+        fclose($fp);
+        return [self::statusFromHeaders(is_array($headers) ? $headers : []), $body];
     }
 
-    /** Extract the HTTP status code from a $http_response_header array (0 if none). */
-    private function statusFromHeaders(array $headers): int
+    /** Extract the HTTP status code from the response header lines (0 if none). */
+    private static function statusFromHeaders(array $headers): int
     {
         $code = 0;
         foreach ($headers as $h) {

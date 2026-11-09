@@ -782,7 +782,7 @@ final class MissCache
         if ($params === '') {
             return 'jpg';
         }
-        parse_str($params, $a);
+        parse_str(str_replace("\0", '', $params), $a);   // PHP 8.6 throws on a NUL, which a template can pass on
         $f = isset($a['f']) ? strtolower((string) $a['f']) : '';
         return match ($f) {
             'png', 'gif', 'webp', 'avif', 'bmp', 'ico' => $f,

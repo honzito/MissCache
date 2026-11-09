@@ -135,6 +135,31 @@ final class PhpThumbPluginTest extends TestCase
         self::assertFileExists("$cacheDir/same-size.jpg!w=10.jpg", 'size alone must not condemn a file');
     }
 
+    /** Without curl the status comes from the stream; the failure redirect is never followed. */
+    public function testStreamFetchReadsTheStatus(): void
+    {
+        file_put_contents($this->tmp . '/s.php', '<?php http_response_code((int) $_GET["c"]); if ($_GET["c"] === "302") { header("Location: /elsewhere"); } echo "body";');
+        $port = stream_socket_server('tcp://127.0.0.1:0');
+        $addr = stream_socket_get_name($port, false);
+        fclose($port);
+        $get    = new \ReflectionMethod(PhpThumbPlugin::class, 'streamGet');
+        $server = proc_open([PHP_BINARY, '-S', $addr, '-t', $this->tmp], [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
+        try {
+            for ($i = 0; $i < 50 && !($up = @fsockopen('tcp://' . $addr)); $i++) {
+                usleep(100_000);
+            }
+            self::assertNotFalse($up, 'php -S did not start');
+            fclose($up);
+            self::assertSame([200, 'body'], $get->invoke(null, "http://$addr/s.php?c=200"));
+            self::assertSame([302, 'body'], $get->invoke(null, "http://$addr/s.php?c=302"));
+            self::assertSame([500, 'body'], $get->invoke(null, "http://$addr/s.php?c=500"));
+        } finally {
+            proc_terminate($server);
+            proc_close($server);
+        }
+        self::assertSame([0, false], $get->invoke(null, "http://$addr/s.php?c=200"), 'nothing listens any more');
+    }
+
     #[DataProvider('failedFetches')]
     public function testFailedFetchReturnsNull(int $code, string|false $body, bool $logged): void
     {

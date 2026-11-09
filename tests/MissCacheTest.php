@@ -60,6 +60,12 @@ final class MissCacheTest extends TestCase
         self::assertStringEndsWith('.avif', $url);
     }
 
+    /** a template can pass on a NUL from an item; parse_str() throws on one in PHP 8.6 */
+    public function testGetCachedUrlTakesANulByte(): void
+    {
+        self::assertStringEndsWith('.png', $this->mc()->getCachedUrl('pT', "img_upload/123/photo.jpg?w=150\0&f=png"));
+    }
+
     public function testGetCachedUrlUnknownPluginThrows(): void
     {
         $this->expectException(\RuntimeException::class);
@@ -466,9 +472,7 @@ final class MissCacheTest extends TestCase
     /** @param array<int,mixed> $args */
     private static function invokeStatic(string $method, array $args): mixed
     {
-        $m = new \ReflectionMethod(MissCache::class, $method);
-        $m->setAccessible(true);
-        return $m->invoke(null, ...$args);
+        return (new \ReflectionMethod(MissCache::class, $method))->invoke(null, ...$args);
     }
 
     /** a base url spelled with "//" inside is stripped as configured - collapsing it first moved every cache url */
